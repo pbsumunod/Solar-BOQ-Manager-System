@@ -16,8 +16,12 @@ What this does:
 
 Usage:
     .venv/bin/python tools/setup_google_auth.py
+    .venv/bin/python tools/setup_google_auth.py --yes   # auto-confirm copying local projects, no prompt
 
 Everything this script writes locally (token.json) is already gitignored.
+Safe to re-run: reuses an existing token.json (delete it to force a fresh
+sign-in) and won't duplicate the Drive folder/catalog spreadsheet if they
+already exist.
 """
 
 import json
@@ -27,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from google_auth_oauthlib.flow import InstalledAppFlow
+from gspread.exceptions import WorksheetNotFound
 
 from lib import boq_data, catalog, gsheets_storage
 
@@ -39,6 +44,11 @@ CATALOG_SPREADSHEET_NAME = "BOQ Materials Catalog"
 
 
 def run_oauth_flow() -> dict:
+    if TOKEN_PATH.exists():
+        token_info = json.loads(TOKEN_PATH.read_text())
+        print(f"Reusing existing {TOKEN_PATH} (delete it to force a fresh sign-in).")
+        return token_info
+
     if not CREDENTIALS_PATH.exists():
         print(f"Missing {CREDENTIALS_PATH}.")
         print("Download an OAuth Client ID (type: Desktop app) from Google Cloud")
@@ -78,27 +88,45 @@ def find_or_create_projects_folder(drive) -> str:
     return folder_id
 
 
+def _seed_catalog_worksheet(ws) -> int:
+    local_catalog = catalog.load_catalog()
+    rows = [catalog.CATALOG_COLUMNS] + local_catalog.astype(object).where(local_catalog.notna(), "").values.tolist()
+    ws.update(rows, value_input_option="USER_ENTERED")
+    return len(local_catalog)
+
+
 def find_or_create_catalog_spreadsheet(client) -> str:
     existing = client.list_spreadsheet_files(title=CATALOG_SPREADSHEET_NAME)
     if existing:
         spreadsheet_id = existing[0]["id"]
-        print(f'Found existing "{CATALOG_SPREADSHEET_NAME}": {spreadsheet_id}')
-        return spreadsheet_id
+        sh = client.open_by_key(spreadsheet_id)
+        try:
+            sh.worksheet(gsheets_storage.CATALOG_SHEET)
+            print(f'Found existing "{CATALOG_SPREADSHEET_NAME}" (already set up): {spreadsheet_id}')
+            return spreadsheet_id
+        except WorksheetNotFound:
+            # A spreadsheet with the right name exists but is missing its
+            # Catalog tab -- almost certainly a leftover half-created file
+            # from an earlier run that failed partway through (e.g. the
+            # Sheets API wasn't enabled yet). Finish setting it up rather
+            # than treating "name matches" as "fully configured".
+            print(f'Found existing "{CATALOG_SPREADSHEET_NAME}" but its Catalog tab is missing (likely from an interrupted earlier run) -- fixing it now.')
+            ws = sh.add_worksheet(gsheets_storage.CATALOG_SHEET, rows=200, cols=10)
+            count = _seed_catalog_worksheet(ws)
+            print(f'Added and seeded the Catalog tab ({count} items): {spreadsheet_id}')
+            return spreadsheet_id
 
     sh = client.create(CATALOG_SPREADSHEET_NAME)
     default_ws = sh.sheet1
     ws = sh.add_worksheet(gsheets_storage.CATALOG_SHEET, rows=200, cols=10)
     sh.del_worksheet(default_ws)
 
-    local_catalog = catalog.load_catalog()
-    rows = [catalog.CATALOG_COLUMNS] + local_catalog.astype(object).where(local_catalog.notna(), "").values.tolist()
-    ws.update(rows, value_input_option="USER_ENTERED")
-
-    print(f'Created "{CATALOG_SPREADSHEET_NAME}" ({len(local_catalog)} items seeded from data/materials_catalog.xlsx): {sh.id}')
+    count = _seed_catalog_worksheet(ws)
+    print(f'Created "{CATALOG_SPREADSHEET_NAME}" ({count} items seeded from data/materials_catalog.xlsx): {sh.id}')
     return sh.id
 
 
-def migrate_local_projects() -> None:
+def migrate_local_projects(auto_yes: bool = False) -> None:
     """Offer to copy existing local projects (data/projects/*.xlsx) into new
     Google Sheets, so switching backends doesn't strand anything already
     saved. Uses gsheets_storage directly (must already be configure()'d),
@@ -108,18 +136,35 @@ def migrate_local_projects() -> None:
         return
 
     names = ", ".join(f'"{p["name"]}"' for p in local_projects)
-    answer = input(f"\nFound {len(local_projects)} local project(s) ({names}). Copy them into Google Sheets too? [y/N] ")
-    if answer.strip().lower() != "y":
-        print("Skipped local project migration.")
-        return
+    if auto_yes:
+        print(f"\nFound {len(local_projects)} local project(s) ({names}). Copying into Google Sheets (--yes passed)...")
+    else:
+        try:
+            answer = input(f"\nFound {len(local_projects)} local project(s) ({names}). Copy them into Google Sheets too? [y/N] ")
+        except EOFError:
+            # No interactive stdin available (e.g. run from a non-interactive
+            # shell) -- default to skipping rather than crashing. Re-run with
+            # --yes to migrate without the prompt.
+            print("\nNo interactive input available, so skipping the local-project-copy prompt.")
+            print(f"Found {len(local_projects)} local project(s) ({names}) not yet migrated.")
+            print("Re-run with --yes to copy them into Google Sheets non-interactively.")
+            return
+        if answer.strip().lower() != "y":
+            print("Skipped local project migration.")
+            return
 
+    already_in_sheets = {p["name"] for p in gsheets_storage.list_projects()}
     for p in local_projects:
+        if p["name"] in already_in_sheets:
+            print(f'  Skipped "{p["name"]}" -- a project with that name already exists in Google Sheets.')
+            continue
         materials_df, expenses_df, meta = boq_data.load_project(p["slug"])
         new_slug = gsheets_storage.create_project(meta.get("project_name") or p["name"], materials_df, expenses_df)
         print(f'  Copied "{p["name"]}" -> new Google Sheets project {new_slug}')
 
 
 def main() -> None:
+    auto_yes = "--yes" in sys.argv[1:]
     token_info = run_oauth_flow()
 
     import gspread
@@ -141,7 +186,7 @@ def main() -> None:
     catalog_id = find_or_create_catalog_spreadsheet(client)
 
     gsheets_storage.configure(token_info, folder_id, catalog_id)
-    migrate_local_projects()
+    migrate_local_projects(auto_yes=auto_yes)
 
     print("\n" + "=" * 70)
     print("Setup complete. Paste this into your Streamlit Cloud app's Secrets")
