@@ -88,42 +88,62 @@ def find_or_create_projects_folder(drive) -> str:
     return folder_id
 
 
-def _seed_catalog_worksheet(ws) -> int:
-    local_catalog = catalog.load_catalog()
-    rows = [catalog.CATALOG_COLUMNS] + local_catalog.astype(object).where(local_catalog.notna(), "").values.tolist()
+def _seed_df_worksheet(ws, columns: list, df) -> int:
+    rows = [columns] + df.astype(object).where(df.notna(), "").values.tolist()
     ws.update(rows, value_input_option="USER_ENTERED")
-    return len(local_catalog)
+    return len(df)
+
+
+def _ensure_worksheet(sh, sheet_name: str, columns: list, load_local_df) -> int:
+    """Ensure `sheet_name` exists on spreadsheet `sh`, seeding it from
+    `load_local_df()` (a zero-arg callable returning the local-file version
+    of this data) if the tab has to be created. Returns the row count
+    seeded (0 if the tab already existed -- nothing changed)."""
+    try:
+        sh.worksheet(sheet_name)
+        return 0
+    except WorksheetNotFound:
+        ws = sh.add_worksheet(sheet_name, rows=200, cols=max(len(columns) + 2, 10))
+        return _seed_df_worksheet(ws, columns, load_local_df())
 
 
 def find_or_create_catalog_spreadsheet(client) -> str:
+    """Find or create the "BOQ Materials Catalog" spreadsheet, and make sure
+    all four of its tabs (Catalog, Stores, Categories, Material List) exist
+    -- seeding any that are missing from local data. Handles both a
+    brand-new spreadsheet and a spreadsheet that exists but is missing one
+    or more tabs (e.g. a leftover half-created file from an earlier run
+    that failed partway through, such as before the Sheets API was
+    enabled, or an older catalog spreadsheet from before the multi-store
+    tabs existed at all)."""
     existing = client.list_spreadsheet_files(title=CATALOG_SPREADSHEET_NAME)
     if existing:
         spreadsheet_id = existing[0]["id"]
         sh = client.open_by_key(spreadsheet_id)
-        try:
-            sh.worksheet(gsheets_storage.CATALOG_SHEET)
-            print(f'Found existing "{CATALOG_SPREADSHEET_NAME}" (already set up): {spreadsheet_id}')
-            return spreadsheet_id
-        except WorksheetNotFound:
-            # A spreadsheet with the right name exists but is missing its
-            # Catalog tab -- almost certainly a leftover half-created file
-            # from an earlier run that failed partway through (e.g. the
-            # Sheets API wasn't enabled yet). Finish setting it up rather
-            # than treating "name matches" as "fully configured".
-            print(f'Found existing "{CATALOG_SPREADSHEET_NAME}" but its Catalog tab is missing (likely from an interrupted earlier run) -- fixing it now.')
-            ws = sh.add_worksheet(gsheets_storage.CATALOG_SHEET, rows=200, cols=10)
-            count = _seed_catalog_worksheet(ws)
-            print(f'Added and seeded the Catalog tab ({count} items): {spreadsheet_id}')
-            return spreadsheet_id
+        print(f'Found existing "{CATALOG_SPREADSHEET_NAME}": {spreadsheet_id}')
+    else:
+        sh = client.create(CATALOG_SPREADSHEET_NAME)
+        default_ws = sh.sheet1
+        spreadsheet_id = sh.id
+        print(f'Created "{CATALOG_SPREADSHEET_NAME}": {spreadsheet_id}')
 
-    sh = client.create(CATALOG_SPREADSHEET_NAME)
-    default_ws = sh.sheet1
-    ws = sh.add_worksheet(gsheets_storage.CATALOG_SHEET, rows=200, cols=10)
-    sh.del_worksheet(default_ws)
+    added_catalog = _ensure_worksheet(sh, gsheets_storage.CATALOG_SHEET, catalog.CATALOG_COLUMNS, catalog.load_catalog)
+    if added_catalog:
+        print(f"  Added and seeded the Catalog tab ({added_catalog} item(s) from data/materials_catalog.xlsx).")
+    added_stores = _ensure_worksheet(sh, gsheets_storage.STORES_SHEET, catalog.STORES_COLUMNS, catalog.load_stores)
+    if added_stores:
+        print(f"  Added and seeded the Stores tab ({added_stores} store(s) from data/stores.xlsx).")
+    added_categories = _ensure_worksheet(sh, gsheets_storage.CATEGORIES_SHEET, catalog.CATEGORY_LIST_COLUMNS, catalog.load_category_list)
+    if added_categories:
+        print(f"  Added and seeded the Categories tab ({added_categories} categor{'y' if added_categories == 1 else 'ies'}).")
+    added_materials = _ensure_worksheet(sh, gsheets_storage.MATERIAL_LIST_SHEET, catalog.MATERIAL_LIST_COLUMNS, catalog.load_material_list)
+    if added_materials:
+        print(f"  Added and seeded the Material List tab ({added_materials} material(s)).")
 
-    count = _seed_catalog_worksheet(ws)
-    print(f'Created "{CATALOG_SPREADSHEET_NAME}" ({count} items seeded from data/materials_catalog.xlsx): {sh.id}')
-    return sh.id
+    if not existing:
+        sh.del_worksheet(default_ws)
+
+    return spreadsheet_id
 
 
 def migrate_local_projects(auto_yes: bool = False) -> None:

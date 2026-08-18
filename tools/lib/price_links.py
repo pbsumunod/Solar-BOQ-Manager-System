@@ -27,3 +27,11 @@ def build_price_check_links(search_term: str) -> dict[str, str]:
         "Lazada": LAZADA_SEARCH_URL_TEMPLATE.format(query=query),
         "Facebook Marketplace": FB_MARKETPLACE_SEARCH_URL_TEMPLATE.format(query=query),
     }
+
+
+GOOGLE_MAPS_SEARCH_URL_TEMPLATE = "https://www.google.com/maps/search/?api=1&query={query}"
+
+
+def build_maps_link(address: str) -> str:
+    """Build a Google Maps search/directions URL for a store's address."""
+    return GOOGLE_MAPS_SEARCH_URL_TEMPLATE.format(query=quote_plus(address.strip()))

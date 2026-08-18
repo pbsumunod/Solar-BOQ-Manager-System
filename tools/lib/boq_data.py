@@ -30,6 +30,7 @@ CORE_MATERIAL_COLUMNS = [
     "Brand",
     "Quantity",
     "Unit of Measurement",
+    "Store Name",
     "Unit Cost (₱)",
     "Total Cost (₱)",
     "Notes",
@@ -79,6 +80,8 @@ COLUMN_ALIASES = {
     "total": "Total Cost (₱)",
     "category": "Category",
     "notes": "Notes",
+    "store": "Store Name",
+    "store name": "Store Name",
     "expense name": "Expense Name",
     "expense": "Expense Name",
     "amount": "Amount (₱)",
@@ -135,6 +138,15 @@ def validate_and_normalize_materials(df: pd.DataFrame) -> tuple[pd.DataFrame, li
             df[col] = ""
             warnings.append(f'Added missing optional column "{col}".')
 
+    if "Store Name" not in df.columns:
+        # Default to the "unknown provenance" sentinel, not a real store
+        # name -- defaulting to e.g. "Plug and Go" would falsely assert
+        # these rows came from that store and would wrongly make them
+        # eligible for the Store -> Unit Cost auto-lookup in
+        # apply_store_pricing() against a store they were never priced from.
+        df["Store Name"] = catalog.CUSTOM_STORE_LABEL
+        warnings.append('Added missing "Store Name" column (defaulted to "Custom / Manual").')
+
     if "Total Cost (₱)" not in df.columns:
         df["Total Cost (₱)"] = 0.0
 
@@ -146,8 +158,9 @@ def validate_and_normalize_materials(df: pd.DataFrame) -> tuple[pd.DataFrame, li
 
     df["Total Cost (₱)"] = df["Quantity"] * df["Unit Cost (₱)"]
 
-    for col in ("Material", "Brand", "Unit of Measurement", "Category", "Notes"):
+    for col in ("Material", "Brand", "Unit of Measurement", "Category", "Notes", "Store Name"):
         df[col] = df[col].fillna("").astype(str)
+    df.loc[df["Store Name"].str.strip() == "", "Store Name"] = catalog.CUSTOM_STORE_LABEL
 
     custom_cols = [c for c in df.columns if c not in CORE_MATERIAL_COLUMNS]
     df = df[CORE_MATERIAL_COLUMNS + custom_cols].reset_index(drop=True)
@@ -174,6 +187,44 @@ def recompute_material_totals(df: pd.DataFrame) -> pd.DataFrame:
     if "Quantity" in df.columns and "Unit Cost (₱)" in df.columns:
         df["Total Cost (₱)"] = df["Quantity"] * df["Unit Cost (₱)"]
     return df
+
+
+def apply_store_pricing(materials_df: pd.DataFrame, catalog_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """For every Materials row whose Store Name is a real, catalogued store
+    (not the "Custom / Manual" sentinel, not blank), look up
+    (Material, Store Name) against the catalog and overwrite Unit Cost (₱)
+    with that store's price.
+
+    Rows with no matching catalog entry are left with their existing
+    Unit Cost (₱) untouched -- resetting to 0 would silently destroy a real,
+    previously-entered price the moment a store name doesn't have a
+    matching catalog row; a warning is returned instead so the caller can
+    surface it without this module depending on Streamlit.
+
+    Returns (updated_df, warnings).
+    """
+    df = materials_df.copy()
+    warnings: list[str] = []
+    if catalog_df is None or catalog_df.empty or "Store Name" not in df.columns:
+        return df, warnings
+
+    price_lookup = {
+        (str(row["Material"]).strip(), str(row["Store Name"]).strip()): row["Unit Cost (₱)"]
+        for _, row in catalog_df.iterrows()
+    }
+
+    for i, row in df.iterrows():
+        store = str(row.get("Store Name", "")).strip()
+        if not store or store == catalog.CUSTOM_STORE_LABEL:
+            continue
+        material = str(row.get("Material", "")).strip()
+        key = (material, store)
+        if key in price_lookup:
+            df.at[i, "Unit Cost (₱)"] = float(price_lookup[key])
+        else:
+            warnings.append(f'No "{store}" catalog price found for "{material}" -- Unit Cost left as-is.')
+
+    return df, warnings
 
 
 def materials_total(df: pd.DataFrame) -> float:
@@ -235,30 +286,36 @@ def workbook_to_bytes(wb: Workbook) -> bytes:
     return buf.getvalue()
 
 
-def _add_catalog_dropdowns(wb: Workbook, catalog_df: pd.DataFrame, max_row: int = 500) -> None:
+def _add_catalog_dropdowns(
+    wb: Workbook,
+    category_list_df: pd.DataFrame,
+    material_list_df: pd.DataFrame,
+    max_row: int = 500,
+) -> None:
     """Add Excel dropdown lists for Category and Material on the Materials
-    sheet, sourced from the current Materials Catalog. Values are written to
-    a hidden helper sheet and referenced by range (not as a literal list)
-    so category/material names with commas or quotes don't break anything,
-    and there's no 255-character formula length limit to worry about.
+    sheet, sourced from the editable Category/Material master lists (the
+    authoritative source now that both are strict dropdown-only fields in
+    the app itself, not derived from the flat multi-store catalog, which
+    would otherwise repeat every material once per store). Values are
+    written to a hidden helper sheet and referenced by range (not as a
+    literal list) so names with commas or quotes don't break anything, and
+    there's no 255-character formula length limit to worry about.
     """
-    if catalog_df is None or catalog_df.empty:
-        return
 
     def _clean_values(series: pd.Series) -> list:
         # Drop actual nulls (NaN/None/pd.NA) *before* stringifying, not
-        # after -- catalog_df can transiently hold a still-blank row right
+        # after -- a list can transiently hold a still-blank row right
         # after the user clicks "+" to add one but hasn't filled it in yet,
         # and depending on dtype that blank cell isn't always a plain string
         # "nan" once stringified. dropna() reliably catches all of those.
         return sorted({str(v).strip() for v in series.dropna().tolist() if str(v).strip()})
 
     try:
-        categories = _clean_values(catalog_df["Category"])
-        materials_list = _clean_values(catalog_df["Material"])
+        categories = _clean_values(category_list_df["Category"]) if category_list_df is not None and not category_list_df.empty else []
+        materials_list = _clean_values(material_list_df["Material"]) if material_list_df is not None and not material_list_df.empty else []
     except Exception:
         # Dropdown suggestions are a nice-to-have -- malformed/partial
-        # catalog data should never block downloading the template itself.
+        # list data should never block downloading the template itself.
         return
     if not categories and not materials_list:
         return
@@ -304,17 +361,22 @@ def _add_catalog_dropdowns(wb: Workbook, catalog_df: pd.DataFrame, max_row: int 
         materials_ws.add_data_validation(dv_material)
 
 
-def generate_template_workbook(catalog_df: pd.DataFrame | None = None) -> bytes:
+def generate_template_workbook(
+    category_list_df: pd.DataFrame | None = None,
+    material_list_df: pd.DataFrame | None = None,
+) -> bytes:
     """Build the downloadable blank BOQ template. Category/Material columns
-    get Excel dropdown suggestions from the Materials Catalog when one is
-    available (typed values outside the list are still accepted -- these
-    are suggestions, not a hard restriction, since a new project may need
-    materials that aren't catalogued yet). Pass the current in-session
-    catalog explicitly to reflect unsaved catalog edits; defaults to the
-    catalog on disk otherwise.
+    get Excel dropdown suggestions from the editable Category/Material
+    master lists when available (typed values outside the list are still
+    accepted -- these are suggestions, not a hard restriction, since a new
+    project may need materials that aren't catalogued yet). Pass the
+    current in-session lists explicitly to reflect unsaved edits; defaults
+    to what's on disk otherwise.
     """
-    if catalog_df is None:
-        catalog_df = catalog.load_catalog()
+    if category_list_df is None:
+        category_list_df = catalog.load_category_list()
+    if material_list_df is None:
+        material_list_df = catalog.load_material_list()
 
     materials = pd.DataFrame(
         [
@@ -324,6 +386,7 @@ def generate_template_workbook(catalog_df: pd.DataFrame | None = None) -> bytes:
                 "Brand": "JA Solar",
                 "Quantity": 10,
                 "Unit of Measurement": "pcs",
+                "Store Name": "Plug and Go",
                 "Unit Cost (₱)": 8500.00,
                 "Total Cost (₱)": 85000.00,
                 "Notes": "EXAMPLE ROW -- delete before use",
@@ -349,7 +412,7 @@ def generate_template_workbook(catalog_df: pd.DataFrame | None = None) -> bytes:
         "schema_version": SCHEMA_VERSION,
     }
     wb = build_workbook(materials, expenses, meta)
-    _add_catalog_dropdowns(wb, catalog_df)
+    _add_catalog_dropdowns(wb, category_list_df, material_list_df)
     return workbook_to_bytes(wb)
 
 

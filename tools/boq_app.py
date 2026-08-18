@@ -56,8 +56,8 @@ def _check_password() -> bool:
 def _select_storage_backend():
     """Pick Google Sheets (if configured via secrets) or local Excel files
     otherwise. Both expose the same list_projects/load_project/save_project/
-    create_project (and load_catalog/save_catalog) functions, so the rest of
-    the app doesn't need to know which one is active."""
+    create_project/load_stores/save_stores/load_category_list/... functions,
+    so the rest of the app doesn't need to know which one is active."""
     google_oauth = _safe_secret("google_oauth")
     boq_config = _safe_secret("boq")
     if google_oauth and boq_config and not gsheets_storage.is_configured():
@@ -96,16 +96,30 @@ def _project_dirty() -> bool:
         return True
 
 
-def _snapshot_catalog() -> None:
-    st.session_state.catalog_saved_snapshot = st.session_state.catalog_df.copy()
+def _snapshot_catalog_bundle() -> None:
+    """The Materials Catalog tab now covers four pieces of session state
+    (the catalog itself, plus Stores/Categories/Material-list master data)
+    under one "Save catalog" button -- snapshot all four together so the
+    dirty flag reflects any of them changing."""
+    st.session_state.catalog_bundle_snapshot = (
+        st.session_state.catalog_df.copy(),
+        st.session_state.stores_df.copy(),
+        st.session_state.category_list_df.copy(),
+        st.session_state.material_list_df.copy(),
+    )
 
 
-def _catalog_dirty() -> bool:
-    snapshot = st.session_state.get("catalog_saved_snapshot")
+def _catalog_bundle_dirty() -> bool:
+    snapshot = st.session_state.get("catalog_bundle_snapshot")
     if snapshot is None:
         return False
     try:
-        return not st.session_state.catalog_df.equals(snapshot)
+        return not (
+            st.session_state.catalog_df.equals(snapshot[0])
+            and st.session_state.stores_df.equals(snapshot[1])
+            and st.session_state.category_list_df.equals(snapshot[2])
+            and st.session_state.material_list_df.equals(snapshot[3])
+        )
     except Exception:
         return True
 
@@ -120,7 +134,10 @@ def _init_state() -> None:
         _snapshot_project()
     if "catalog_df" not in st.session_state:
         st.session_state.catalog_df = catalog_store.load_catalog()
-        _snapshot_catalog()
+        st.session_state.stores_df = catalog_store.load_stores()
+        st.session_state.category_list_df = catalog_store.load_category_list()
+        st.session_state.material_list_df = catalog_store.load_material_list()
+        _snapshot_catalog_bundle()
 
 
 def _load_project(slug: str) -> None:
@@ -275,7 +292,9 @@ with st.sidebar:
     st.divider()
     st.download_button(
         "⬇️ Download blank BOQ template",
-        data=boq_data.generate_template_workbook(st.session_state.catalog_df),
+        data=boq_data.generate_template_workbook(
+            st.session_state.category_list_df, st.session_state.material_list_df
+        ),
         file_name="boq_template.xlsx",
         mime=EXCEL_MIME,
         use_container_width=True,
@@ -306,34 +325,56 @@ with tab_boq:
 
             materials_df = st.session_state.materials_df
             catalog_df = st.session_state.catalog_df
+            stores_df = st.session_state.stores_df
+            store_names = stores_df["Store Name"].tolist()
 
             if catalog_df.empty:
                 st.caption("Materials Catalog is empty — add default materials in the 🗂️ Materials Catalog tab.")
             else:
                 with st.expander("➕ Add items from catalog"):
+                    add_store_options = ["All stores"] + store_names
+                    default_store_index = (
+                        add_store_options.index("Plug and Go") if "Plug and Go" in add_store_options else 0
+                    )
+                    add_store_filter = st.selectbox(
+                        "Filter by store", add_store_options, index=default_store_index, key="add_from_catalog_store_filter"
+                    )
+
+                    # Reset the picker when the store filter changes, since
+                    # its previously-selected indices may no longer be valid
+                    # options in the new filtered set.
+                    if st.session_state.get("_last_add_store_filter") != add_store_filter:
+                        st.session_state["catalog_pick"] = []
+                        st.session_state["_last_add_store_filter"] = add_store_filter
+
+                    filtered_catalog_for_add = (
+                        catalog_df if add_store_filter == "All stores" else catalog_df[catalog_df["Store Name"] == add_store_filter]
+                    )
+
                     def _format_catalog_choice(idx: int) -> str:
                         row = catalog_df.loc[idx]
                         brand_model = " (" + " / ".join(filter(None, [row["Brand"], row["Model"]])) + ")" if row["Brand"] or row["Model"] else ""
                         unit = row["Unit of Measurement"] or "unit"
-                        return f"{row['Category']} — {row['Material']}{brand_model} · ₱{row['Default Unit Cost (₱)']:,.2f}/{unit}"
+                        store = row["Store Name"] or "—"
+                        return f"[{store}] {row['Category']} — {row['Material']}{brand_model} · ₱{row['Unit Cost (₱)']:,.2f}/{unit}"
 
                     col_select_all, col_clear_all = st.columns(2)
                     with col_select_all:
                         if st.button("Select all", key="catalog_select_all", use_container_width=True):
-                            st.session_state["catalog_pick"] = list(catalog_df.index)
+                            st.session_state["catalog_pick"] = list(filtered_catalog_for_add.index)
                     with col_clear_all:
                         if st.button("Clear all", key="catalog_clear_all", use_container_width=True):
                             st.session_state["catalog_pick"] = []
 
                     picked_indices = st.multiselect(
                         "Catalog items",
-                        options=list(catalog_df.index),
+                        options=list(filtered_catalog_for_add.index),
                         format_func=_format_catalog_choice,
                         key="catalog_pick",
                     )
 
                     if picked_indices:
-                        preview_cols = ["Category", "Material", "Brand", "Model", "Unit of Measurement", "Default Unit Cost (₱)"]
+                        preview_cols = ["Category", "Material", "Brand", "Model", "Unit of Measurement", "Store Name", "Unit Cost (₱)"]
                         preview_df = catalog_df.loc[picked_indices, preview_cols].copy()
                         preview_df["Quantity"] = 1.0
 
@@ -346,7 +387,8 @@ with tab_boq:
                                 "Brand": st.column_config.TextColumn(disabled=True),
                                 "Model": st.column_config.TextColumn(disabled=True),
                                 "Unit of Measurement": st.column_config.TextColumn(disabled=True),
-                                "Default Unit Cost (₱)": st.column_config.NumberColumn(disabled=True, format="accounting", step=0.01),
+                                "Store Name": st.column_config.TextColumn(disabled=True),
+                                "Unit Cost (₱)": st.column_config.NumberColumn(disabled=True, format="accounting", step=0.01),
                                 "Quantity": st.column_config.NumberColumn(min_value=0.0, step=1.0),
                             },
                             num_rows="fixed",
@@ -366,7 +408,8 @@ with tab_boq:
                                         "Brand": picked["Brand"],
                                         "Quantity": preview_row["Quantity"],
                                         "Unit of Measurement": picked["Unit of Measurement"],
-                                        "Unit Cost (₱)": picked["Default Unit Cost (₱)"],
+                                        "Store Name": picked["Store Name"],
+                                        "Unit Cost (₱)": picked["Unit Cost (₱)"],
                                         "Notes": f"Model: {picked['Model']}" if picked["Model"] else "",
                                     }
                                 )
@@ -415,7 +458,16 @@ with tab_boq:
                         st.caption("No custom columns yet.")
 
             column_config = {
+                "Category": st.column_config.SelectboxColumn(
+                    "Category", options=st.session_state.category_list_df["Category"].tolist(), required=False
+                ),
+                "Material": st.column_config.SelectboxColumn(
+                    "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
+                ),
                 "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0),
+                "Store Name": st.column_config.SelectboxColumn(
+                    "Store Name", options=store_names + [catalog.CUSTOM_STORE_LABEL], required=True
+                ),
                 "Unit Cost (₱)": st.column_config.NumberColumn("Unit Cost (₱)", min_value=0.0, format="accounting", step=0.01),
                 "Total Cost (₱)": st.column_config.NumberColumn("Total Cost (₱)", disabled=True, format="accounting", step=0.01),
             }
@@ -433,6 +485,7 @@ with tab_boq:
                     )
                     st.form_submit_button("Apply changes", type="primary")
                 materials_df.loc[edited.index] = edited
+                materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
                 materials_df = boq_data.recompute_material_totals(materials_df)
             else:
                 with st.form("materials_form", border=False):
@@ -443,7 +496,11 @@ with tab_boq:
                         key="materials_editor",
                     )
                     st.form_submit_button("Apply changes", type="primary")
-                materials_df = boq_data.recompute_material_totals(edited)
+                materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
+                materials_df = boq_data.recompute_material_totals(materials_df)
+
+            for w in pricing_warnings:
+                st.warning(w)
 
             st.session_state.materials_df = materials_df
             st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
@@ -501,11 +558,21 @@ with tab_boq:
 with tab_catalog:
     st.title("🗂️ Materials Catalog")
     st.caption(
-        "Default materials and prices you can pull into any BOQ. Edits here update the "
+        "Multi-store default materials and prices you can pull into any BOQ. Edits here update the "
         "defaults for future use — they don't change unit costs already saved on existing projects."
     )
 
-    col_search, col_save = st.columns([3, 1])
+    stores_df = st.session_state.stores_df
+    store_names = stores_df["Store Name"].tolist()
+
+    col_store_filter, col_search, col_save = st.columns([1, 2, 1])
+    with col_store_filter:
+        catalog_store_filter = st.selectbox(
+            "Filter by store",
+            ["All stores"] + store_names,
+            key="catalog_store_filter",
+            label_visibility="collapsed",
+        )
     with col_search:
         catalog_search = st.text_input(
             "Search catalog",
@@ -514,7 +581,7 @@ with tab_catalog:
             label_visibility="collapsed",
         )
     with col_save:
-        catalog_dirty = _catalog_dirty()
+        catalog_dirty = _catalog_bundle_dirty()
         save_catalog_label = "🟠 Save catalog*" if catalog_dirty else "✅ Save catalog"
         if st.button(
             save_catalog_label,
@@ -523,22 +590,104 @@ with tab_catalog:
             help="Unsaved changes in this session" if catalog_dirty else "Everything is saved",
         ):
             catalog_store.save_catalog(st.session_state.catalog_df)
-            _snapshot_catalog()
+            catalog_store.save_stores(st.session_state.stores_df)
+            catalog_store.save_category_list(st.session_state.category_list_df)
+            catalog_store.save_material_list(st.session_state.material_list_df)
+            _snapshot_catalog_bundle()
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
             st.rerun()
 
+    with st.expander("⚙️ Manage stores, categories & materials"):
+        st.markdown("**Stores**")
+        edited_stores = st.data_editor(
+            stores_df,
+            num_rows="dynamic",
+            column_config={"Address": st.column_config.TextColumn("Address", width="large")},
+            key="stores_editor",
+        )
+        st.session_state.stores_df = catalog.normalize_stores_df(edited_stores)
+
+        stores_with_address = st.session_state.stores_df[st.session_state.stores_df["Address"].str.strip() != ""]
+        if not stores_with_address.empty:
+            for _, row in stores_with_address.iterrows():
+                maps_url = price_links.build_maps_link(row["Address"])
+                st.markdown(f"📍 **{row['Store Name']}** — {row['Address']} · [Open in Google Maps]({maps_url})")
+
+        st.markdown("---")
+        st.markdown("**Add a new store**")
+        current_store_names = st.session_state.stores_df["Store Name"].tolist()
+        new_store_name = st.text_input("Store name", key="new_store_name")
+        new_store_address = st.text_input("Address", key="new_store_address")
+        copy_choice_options = ["Blank"] + (["Copy from existing store"] if current_store_names else [])
+        copy_choice = st.radio("Starting catalog", copy_choice_options, key="new_store_copy_choice")
+        copy_source = None
+        if copy_choice == "Copy from existing store":
+            copy_source = st.selectbox("Copy catalog from", current_store_names, key="new_store_copy_source")
+
+        if st.button("Create store", type="primary"):
+            name = new_store_name.strip()
+            if not name:
+                st.error("Enter a store name.")
+            elif name.lower() in {s.lower() for s in current_store_names}:
+                st.error(f'A store named "{name}" already exists.')
+            else:
+                updated_stores = pd.concat(
+                    [st.session_state.stores_df, pd.DataFrame([{"Store Name": name, "Address": new_store_address.strip()}])],
+                    ignore_index=True,
+                )
+                st.session_state.stores_df = catalog.normalize_stores_df(updated_stores)
+
+                if copy_source:
+                    copied_rows = st.session_state.catalog_df[st.session_state.catalog_df["Store Name"] == copy_source].copy()
+                    copied_rows["Store Name"] = name
+                    updated_catalog = pd.concat([st.session_state.catalog_df, copied_rows], ignore_index=True)
+                    st.session_state.catalog_df = catalog.normalize_catalog_df(updated_catalog)
+
+                st.toast(f'Created store "{name}".', icon="✅")
+                st.rerun()
+
+        st.markdown("---")
+        col_cat_list, col_mat_list = st.columns(2)
+        with col_cat_list:
+            st.markdown("**Categories**")
+            edited_cat_list = st.data_editor(
+                st.session_state.category_list_df, num_rows="dynamic", hide_index=True, key="category_list_editor"
+            )
+            st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
+        with col_mat_list:
+            st.markdown("**Materials**")
+            edited_mat_list = st.data_editor(
+                st.session_state.material_list_df, num_rows="dynamic", hide_index=True, key="material_list_editor"
+            )
+            st.session_state.material_list_df = catalog.normalize_simple_list_df(edited_mat_list, "Material")
+
     catalog_df = st.session_state.catalog_df
-    catalog_search_cols = ["Category", "Material", "Brand", "Model"]
+    catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {
-        "Default Unit Cost (₱)": st.column_config.NumberColumn(
-            "Default Unit Cost (₱)", min_value=0.0, format="accounting", step=0.01
+        "Category": st.column_config.SelectboxColumn(
+            "Category", options=st.session_state.category_list_df["Category"].tolist(), required=True
+        ),
+        "Material": st.column_config.SelectboxColumn(
+            "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
+        ),
+        "Store Name": st.column_config.SelectboxColumn("Store Name", options=store_names, required=True),
+        "Unit Cost (₱)": st.column_config.NumberColumn(
+            "Unit Cost (₱)", min_value=0.0, format="accounting", step=0.01
         ),
     }
 
-    if catalog_search.strip():
-        visible_catalog = catalog_df[_text_search_mask(catalog_df, catalog_search, catalog_search_cols)]
-        st.caption(f"Showing {len(visible_catalog)} of {len(catalog_df)} items. Clear search to add or delete rows.")
+    text_mask = _text_search_mask(catalog_df, catalog_search, catalog_search_cols)
+    store_mask = (
+        pd.Series(True, index=catalog_df.index)
+        if catalog_store_filter == "All stores"
+        else (catalog_df["Store Name"] == catalog_store_filter)
+    )
+    is_filtered = bool(catalog_search.strip()) or catalog_store_filter != "All stores"
+
+    if is_filtered:
+        visible_catalog = catalog_df[text_mask & store_mask]
+        st.caption(f"Showing {len(visible_catalog)} of {len(catalog_df)} items. Clear filters to add or delete rows.")
         with st.form("catalog_form_filtered", border=False):
             edited_catalog = st.data_editor(
                 visible_catalog,

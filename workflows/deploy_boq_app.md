@@ -49,8 +49,11 @@ cd "Solar System"
 This opens your browser for a one-time Google sign-in/consent, then:
 - saves `token.json` locally (gitignored),
 - creates a "BOQ Projects" Drive folder and a "BOQ Materials Catalog"
-  spreadsheet (seeded from your current local catalog) if they don't
-  already exist -- safe to re-run,
+  spreadsheet (with its `Catalog`/`Stores`/`Categories`/`Material List` tabs,
+  each seeded from your current local data) if they don't already exist --
+  safe to re-run, and also fills in any of those four tabs that are missing
+  from an existing spreadsheet (e.g. an older catalog spreadsheet from
+  before multi-store pricing existed),
 - offers to copy any existing local projects (e.g. `sample-project.xlsx`)
   into new Google Sheets, so nothing gets stranded,
 - prints a ready-to-paste secrets block (refresh token, client id/secret,
@@ -127,3 +130,9 @@ Google Sheets) -- only for code changes.
   backend (`gsheets_storage.py`) -- Drive already guarantees uniqueness, so
   there's no need to reimplement the local backend's slugify/collision
   logic for this backend.
+- Schema changes that touch already-deployed, already-populated live data
+  (e.g. the multi-store catalog rework) get their own one-time migration
+  script (`tools/migrate_multi_store_catalog.py`) rather than being folded
+  into `setup_google_auth.py` -- see `workflows/manage_boq_inventory.md`'s
+  "Materials catalog" section for what it does and why it must run against
+  live data *before* the corresponding code gets deployed, not after.

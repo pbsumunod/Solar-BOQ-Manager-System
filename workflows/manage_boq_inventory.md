@@ -128,39 +128,115 @@ renamed, so any existing exports/links to that file path keep working.
 ## Data model
 **Materials** (core columns, in order — custom columns the user adds appear
 after these): `Category, Material, Brand, Quantity, Unit of Measurement,
-Unit Cost (₱), Total Cost (₱), Notes`. `Total Cost (₱)` is always derived as
-`Quantity × Unit Cost (₱)` and is not directly editable — this is
-intentional, so displayed totals can never drift out of sync with the
-line-item math. (There is no Supplier/Store column — it was removed. It's
-also in `boq_data.LEGACY_DROPPED_MATERIAL_COLUMNS`, so it's actively
-stripped on load from any older project file that still has it, rather than
-reappearing as a custom column. Add other retired column names there if a
-future schema change needs the same treatment.)
+Store Name, Unit Cost (₱), Total Cost (₱), Notes`. `Total Cost (₱)` is
+always derived as `Quantity × Unit Cost (₱)` and is not directly editable —
+this is intentional, so displayed totals can never drift out of sync with
+the line-item math. (There is no Supplier/Store column — it was removed
+early on. It's still in `boq_data.LEGACY_DROPPED_MATERIAL_COLUMNS`, so it's
+actively stripped on load from any older project file that still has it,
+rather than reappearing as a custom column. The newer `Store Name` column,
+added for multi-store pricing, is a deliberately distinct concept — tied to
+a real Stores master list with addresses and per-store catalog pricing, not
+a resurrection of the old free-text column. Add other retired column names
+to `LEGACY_DROPPED_MATERIAL_COLUMNS` if a future schema change needs the
+same treatment.)
 
-All currency columns (`Unit Cost (₱)`, `Total Cost (₱)`, `Amount (₱)`,
-`Default Unit Cost (₱)` in the catalog) display with the `"accounting"`
-Streamlit number format, i.e. comma thousands separators (e.g. `108,000.00`)
-rather than a plain unformatted number.
+`Category` and `Material` are strict dropdown-only fields
+(`st.column_config.SelectboxColumn`), picked from the editable Category/
+Material master lists (see below) rather than free text — this matters
+because the Store → Unit Cost price lookup (below) needs exact Material-name
+matches across different stores' catalog rows to work. `Store Name` is also
+a dropdown, sourced from the Stores list plus one extra sentinel option,
+`"— Custom / Manual —"` (`catalog.CUSTOM_STORE_LABEL`) — picking that opts a
+row out of the auto price-lookup so you can type an arbitrary price by hand.
+Legacy/uploaded rows with no Store Name default to this sentinel too, not to
+a real store name, since defaulting to e.g. "Plug and Go" would falsely
+assert provenance and wrongly make the row eligible for the lookup against a
+store it was never actually priced from. `Brand` and `Unit of Measurement`
+stay free text (`Unit of Measurement` already has its own consistency
+mechanism via `normalize_unit`/`UNIT_ALIASES`).
+
+All currency columns (`Unit Cost (₱)`, `Total Cost (₱)`, `Amount (₱)`, and
+the catalog's own `Unit Cost (₱)`) display with the `"accounting"` Streamlit
+number format, i.e. comma thousands separators (e.g. `108,000.00`) rather
+than a plain unformatted number.
 
 **Expenses**: `Expense Name, Amount (₱), Notes` — for logistics, labor,
 permits, contingency, etc. Tracked separately from materials and added into
 the Grand Total shown at the bottom of the page.
 
-## Materials catalog
-The 🗂️ Materials Catalog tab holds a reusable, project-independent list of
-default materials — `Category, Material, Brand, Model, Unit of Measurement,
-Default Unit Cost (₱)` — stored at `data/materials_catalog.xlsx`. `Brand` is
-the manufacturer/supplier name; `Model` is a specific SKU/model code when
-one is known (most hardware/consumable items don't have one and leave it
-blank — only major equipment like panels/inverters typically do). In the
-📋 BOQ tab, "➕ Add items from catalog" lets you multi-select several catalog
-entries at once (or use "Select all" / "Clear all" to pick the whole catalog
-in one click), set a quantity for each in a preview table, and append them
-all to the current project's Materials table in one action (Model, if
-present, is carried into each row's Notes as `Model: ...` since the BOQ
-table itself has no separate Model column). Each added row's `Unit Cost (₱)`
-is then a normal, independently editable cell — changing it only affects
-that project, not the catalog default.
+## Materials catalog (multi-store)
+The 🗂️ Materials Catalog tab holds a reusable, project-independent,
+**multi-store** list of materials and prices — `Category, Material, Brand,
+Model, Unit of Measurement, Store Name, Unit Cost (₱)` — stored at
+`data/materials_catalog.xlsx`. It's one flat table, not a separate table per
+store: the same Material can appear multiple times, once per store that
+carries it, each with its own `Unit Cost (₱)`. A store filter at the top of
+the tab (and inside "➕ Add items from catalog") gives it the visual/
+functional feel of separate per-store catalogs without the storage
+complexity of literally separating them. `Brand` is the manufacturer name;
+`Model` is a specific SKU/model code when one is known (most hardware/
+consumable items don't have one and leave it blank — only major equipment
+like panels/inverters typically do).
+
+**Stores, Categories, Materials — three more editable master lists**, under
+the tab's "⚙️ Manage stores, categories & materials" expander:
+- **Stores** (`catalog.STORES_COLUMNS = ["Store Name", "Address"]`,
+  `load_stores`/`save_stores`/`ensure_store_exists`): unique on Store Name
+  (case-insensitive). Each store with a non-blank Address gets a
+  "📍 Open in Google Maps" link below the editor
+  (`price_links.build_maps_link`), opening in a new tab. **"Add a new
+  store"** creates a Store Name + Address entry and optionally copies an
+  existing store's entire catalog (all rows, including prices) as a
+  starting point to edit from — mirrors the existing sidebar "Copy from
+  existing project" pattern.
+- **Categories** / **Materials** (`catalog.CATEGORY_LIST_COLUMNS`/
+  `MATERIAL_LIST_COLUMNS`, one text column each): flat, independent lists —
+  Material doesn't "belong to" a Category. Deliberately not hierarchical:
+  `st.column_config.SelectboxColumn` takes one static option list per
+  column with no cascading/dependent-dropdown support, and this app's
+  `st.form`-batched editors can't reactively rebuild `column_config`
+  mid-form anyway, so a flat list needs zero extra plumbing and satisfies
+  the actual goal (consistent Material naming for cross-store lookups)
+  exactly as well as a hierarchical one would.
+- All three master lists dedupe case-insensitively (keeping the first
+  occurrence's casing) via `catalog.normalize_stores_df` /
+  `catalog.normalize_simple_list_df` — "Panels" and "panels" never both
+  survive as separate entries.
+
+**Storage layout differs by backend, deliberately**: locally, Stores/
+Categories/Materials each live in their own small file
+(`data/stores.xlsx`, `data/category_list.xlsx`, `data/material_list.xlsx`),
+*not* extra sheets inside `materials_catalog.xlsx` — `catalog.save_catalog()`'s
+`df.to_excel(path, sheet_name="Catalog")` call replaces the **entire workbook
+file**, not just that one sheet, so colocating them would mean every catalog
+save silently wipes any sheets sharing that file. On Google Sheets this risk
+doesn't exist (`gspread` only touches the one tab it's told to), so there
+they're just three more tabs (`Stores`, `Categories`, `Material List`) on the
+same catalog Spreadsheet — no new secret/ID needed.
+
+In the 📋 BOQ tab, "➕ Add items from catalog" lets you filter by store
+(defaults to "Plug and Go" if present, to preserve the original
+single-store experience), multi-select several catalog entries at once (or
+"Select all" / "Clear all"), set a quantity for each in a preview table, and
+append them all to the current project's Materials table in one action —
+each row's `Store Name` and `Unit Cost (₱)` come straight from the picked
+catalog row (Model, if present, is carried into the row's Notes as
+`Model: ...`, since the BOQ table itself has no separate Model column).
+Changing the store filter resets the picker (`catalog_pick` session key),
+since previously-picked indices may no longer be valid options in the new
+filtered set.
+
+**`boq_data.apply_store_pricing(materials_df, catalog_df)`** is what makes
+picking a Store on a BOQ row actually update the price: on every "Apply
+changes" click (both the search-filtered and unfiltered Materials editor
+branches, right before `recompute_material_totals`), every row whose Store
+Name is a real store (not the Custom/Manual sentinel) gets its
+`Unit Cost (₱)` looked up by `(Material, Store Name)` against the catalog
+and overwritten. **No match found → the existing Unit Cost is left
+untouched and a warning is shown** — never reset to 0, since that would
+silently destroy a real, previously-entered price the moment a store name
+doesn't have a matching catalog row.
 
 `Unit of Measurement` values are normalized to one canonical spelling per
 physical unit (e.g. `pc`/`Pc`/`pcs` → `pcs`, `Mtrs`/`mtrs` → `m`) via
@@ -168,19 +244,26 @@ physical unit (e.g. `pc`/`Pc`/`pcs` → `pcs`, `Mtrs`/`mtrs` → `m`) via
 and save, so the same unit never ends up spelled multiple ways in the
 catalog. Add more aliases there if a new variant shows up.
 
-The catalog itself is directly editable in its tab (add/edit/remove rows,
-including default prices) and persisted with "💾 Save catalog" — useful since
-supplier prices change over time. It was seeded from `PACKAGES.xlsx` (a
-6.6kWp/6kWac/314AH-battery package quote) via:
+The catalog itself (plus Stores/Categories/Materials) is directly editable
+in its tab and persisted together with one "💾 Save catalog" button (uses a
+bundled dirty-state snapshot covering all four pieces of session state —
+`_snapshot_catalog_bundle`/`_catalog_bundle_dirty` — same 🟠/✅ pattern as
+the project Save button). It was originally seeded from `PACKAGES.xlsx` (a
+6.6kWp/6kWac/314AH-battery package quote from "Plug and Go") via:
 ```
 .venv/bin/python tools/import_catalog_from_workbook.py PACKAGES.xlsx
 ```
-That script is reusable for any other package-quote file with the same
-layout (a "No./Description/Technical Specifications/Brand/Model/Quantity/
-UoM/Price/Unit Cost/Total Cost" header row, category labels only on the
-first row of each group) — run it again against a new file to add more
-default materials without duplicating existing catalog entries (matched on
-Category + Material + Brand + Unit of Measurement). It deliberately stops
+or, for a different store's price list:
+```
+.venv/bin/python tools/import_catalog_from_workbook.py OtherQuote.xlsx "ABC Hardware"
+```
+That script is reusable for any package-quote file with the same layout (a
+"No./Description/Technical Specifications/Brand/Model/Quantity/UoM/Price/
+Unit Cost/Total Cost" header row, category labels only on the first row of
+each group), attributing every parsed row to the given store name (defaults
+to "Plug and Go") — run it again to add more materials/stores without
+duplicating existing catalog entries (matched on Category + Material +
+Brand + Unit of Measurement + **Store Name**). It deliberately stops
 importing a sheet at the first cost-summary row (Total Material Cost,
 Installation, Engineering, etc. — see `catalog.STOP_PHRASES`), since those
 are labor/markup lines, not materials.
@@ -208,12 +291,13 @@ location-scoped URL in `price_links.py` (commented inline with an example).
 
 ## Data location and durability
 Locally (the default, no extra setup required), project files live in
-`data/projects/`, and the catalog lives at `data/materials_catalog.xlsx` —
-both **durable, not disposable**, unlike `.tmp/`: nothing in `data/` is
-regenerated automatically, and it should not be cleaned up casually. Both
-are gitignored (Excel binaries don't diff usefully in git, and this may hold
-client pricing), so back them up manually (e.g. periodic copy to Drive) if
-that matters.
+`data/projects/`, and the catalog + its master lists live at
+`data/materials_catalog.xlsx`, `data/stores.xlsx`, `data/category_list.xlsx`,
+`data/material_list.xlsx` — all **durable, not disposable**, unlike `.tmp/`:
+nothing in `data/` is regenerated automatically, and it should not be
+cleaned up casually. All are gitignored (Excel binaries don't diff usefully
+in git, and this may hold client pricing), so back them up manually (e.g.
+periodic copy to Drive) if that matters.
 
 When deployed for shared access, the app switches to a Google Sheets
 storage backend instead (local files don't survive a hosted container
@@ -296,3 +380,34 @@ automatically based on whether Google credentials are configured, via
   it's discovered crashing -- especially for anything editable via
   `num_rows="dynamic"`, since a freshly added, not-yet-filled-in row is a
   completely normal, frequent state to land in `st.session_state` in.
+- Verified before building the multi-store catalog: `df.to_excel(path,
+  sheet_name="Catalog")` -- the exact call `catalog.save_catalog()` already
+  used -- replaces the **entire local `.xlsx` file**, not just the named
+  sheet. This ruled out colocating the new Stores/Categories/Material-List
+  reference data as extra sheets inside `materials_catalog.xlsx` (every
+  catalog save would have silently wiped them) in favor of three separate
+  small files. Google Sheets has no equivalent risk (`gspread` only touches
+  the one worksheet tab it's told to), so that backend just gets three more
+  tabs on the same catalog Spreadsheet -- a deliberate asymmetry between the
+  two backends, not an oversight.
+- `st.testing.v1.AppTest` (Streamlit's own headless test framework) can
+  drive real widget interactions -- button clicks, selectbox/radio/
+  multiselect changes, text inputs, and reading/writing `st.session_state`
+  directly -- across full script reruns, without a browser. Used it to
+  verify the "Add a new store" + "copy from existing store" flow, dirty-state
+  button styling, Google Maps link rendering, and case-insensitive duplicate
+  validation, all end-to-end against the real migrated data. **Limitation**:
+  it has no accessor for `st.data_editor` -- individual cell edits inside a
+  data table can't be driven this way, so anything that specifically
+  requires changing a data_editor cell's value (e.g. actually picking a
+  different Store on a Materials row and confirming the price updates via
+  `apply_store_pricing`) still needs a real click-through, same as this
+  project's established pattern for other data_editor-driven features.
+- The multi-store migration script (`tools/migrate_multi_store_catalog.py`)
+  reads raw (`pd.read_excel` / `worksheet.get_all_values()`, checking for the
+  literal old `"Default Unit Cost (₱)"` header) rather than through
+  `catalog.load_catalog()`/`gsheets_storage.load_catalog()` -- once the code
+  expects the new `"Unit Cost (₱)"` name, those functions would read
+  pre-migration data's old-named column as entirely missing and silently
+  default every price to 0.0. Migrate data first, deploy code second, for
+  any future rename of a column real data already exists under.
