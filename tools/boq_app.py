@@ -19,14 +19,6 @@ st.set_page_config(page_title="BOQ Manager", layout="wide", page_icon="☀️")
 
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
-# Streamlit's data_editor can't have both native column-header sorting and
-# in-grid row add/delete at once (num_rows="dynamic" explicitly disables
-# sorting) -- both Materials tables need sorting, so row deletion moves to
-# this transient checkbox column instead (check a row, "Apply changes"
-# removes it). Never persisted -- stripped back out right after the editor
-# returns, before anything touches st.session_state or storage.
-REMOVE_COL = "🗑️ Remove?"
-
 
 def _safe_secret(*keys):
     """Dig into st.secrets, returning None instead of raising if secrets
@@ -565,7 +557,6 @@ with tab_boq:
                         st.caption("No custom columns yet.")
 
             column_config = {
-                REMOVE_COL: st.column_config.CheckboxColumn(REMOVE_COL, default=False, width="small"),
                 # Category is derived from Material (apply_material_categories,
                 # below) via the Category<->Material mapping, the same
                 # "pick X, Y follows" pattern as Store -> Unit Cost -- so it's
@@ -591,16 +582,52 @@ with tab_boq:
             else:
                 visible_materials_df = materials_df
 
-            display_df = visible_materials_df.copy()
-            display_df.insert(0, REMOVE_COL, False)
+            if not materials_df.empty:
+                with st.expander("🗑️ Remove materials"):
+                    def _format_material_removal_choice(idx: int) -> str:
+                        row = materials_df.loc[idx]
+                        return f"{row['Category']} — {row['Material']} ({row['Store Name']}) · Qty {row['Quantity']}"
+
+                    # A widget's session_state[key] can only be reassigned
+                    # *before* that widget is instantiated in a given run --
+                    # doing it after (e.g. right after the "Remove" button,
+                    # which appears below the multiselect in the layout)
+                    # raises StreamlitAPIException. So resetting the
+                    # selection after a removal is deferred to a flag,
+                    # consumed here, on the next run -- before the
+                    # multiselect below gets created.
+                    if st.session_state.pop("_reset_materials_remove_pick", False):
+                        st.session_state["materials_remove_pick"] = []
+
+                    col_rm_select_all, col_rm_clear_all = st.columns(2)
+                    with col_rm_select_all:
+                        if st.button("Select all", key="materials_remove_select_all", use_container_width=True):
+                            st.session_state["materials_remove_pick"] = list(visible_materials_df.index)
+                    with col_rm_clear_all:
+                        if st.button("Clear all", key="materials_remove_clear_all", use_container_width=True):
+                            st.session_state["materials_remove_pick"] = []
+
+                    to_remove = st.multiselect(
+                        "Materials to remove",
+                        options=list(visible_materials_df.index),
+                        format_func=_format_material_removal_choice,
+                        key="materials_remove_pick",
+                    )
+                    if to_remove and st.button(f"🗑️ Remove {len(to_remove)} item(s)", type="primary"):
+                        st.session_state.materials_df = boq_data.recompute_material_totals(
+                            st.session_state.materials_df.drop(index=to_remove)
+                        )
+                        st.session_state["_reset_materials_remove_pick"] = True
+                        st.toast(f"Removed {len(to_remove)} item(s).", icon="🗑️")
+                        st.rerun()
 
             # num_rows="fixed" (not "dynamic") so column-header click-to-sort
             # works -- Streamlit disables sorting entirely in dynamic mode.
             # Adding rows happens via "Add items from catalog" above;
-            # removing happens via the checkbox column, applied below.
+            # removing happens via the "🗑️ Remove materials" expander above.
             with st.form("materials_form", border=False):
                 edited = st.data_editor(
-                    display_df,
+                    visible_materials_df,
                     num_rows="fixed",
                     column_config=column_config,
                     hide_index=True,
@@ -608,10 +635,7 @@ with tab_boq:
                 )
                 st.form_submit_button("Apply changes", type="primary")
             with _diagnostics("applying your Materials changes"):
-                to_remove = edited.index[edited[REMOVE_COL]]
-                edited = edited.drop(columns=[REMOVE_COL])
                 materials_df.loc[edited.index] = edited
-                materials_df = materials_df.drop(index=to_remove)
                 materials_df = boq_data.apply_material_categories(materials_df, catalog_df)
                 materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
                 materials_df = boq_data.recompute_material_totals(materials_df)
@@ -620,7 +644,7 @@ with tab_boq:
                 st.warning(w)
 
             st.session_state.materials_df = materials_df
-            st.caption("Edit cells above (click a column header to sort), check 🗑️ Remove? on any row you want gone, then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
+            st.caption("Edit cells above (click a column header to sort), then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
 
             with st.expander("🔎 Price-check links (Shopee / Lazada / Facebook Marketplace)"):
                 visible_materials = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
@@ -816,7 +840,6 @@ with tab_catalog:
     catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {
-        REMOVE_COL: st.column_config.CheckboxColumn(REMOVE_COL, default=False, width="small"),
         # This IS where a Material's Category gets defined -- the BOQ
         # Materials table derives its own Category from whatever's set
         # here (apply_material_categories, keyed off Material), so this
@@ -841,15 +864,48 @@ with tab_catalog:
     if is_filtered:
         st.caption(f"Showing {len(visible_catalog_df)} of {len(catalog_df)} items.")
 
-    display_catalog_df = visible_catalog_df.copy()
-    display_catalog_df.insert(0, REMOVE_COL, False)
+    if not catalog_df.empty:
+        with st.expander("🗑️ Remove materials"):
+            def _format_catalog_removal_choice(idx: int) -> str:
+                row = catalog_df.loc[idx]
+                return f"[{row['Store Name']}] {row['Category']} — {row['Material']} · ₱{row['Unit Cost (₱)']:,.2f}"
+
+            # See the matching comment in the BOQ Materials tab's removal
+            # block: session_state[key] can't be reassigned after that
+            # widget has already been instantiated this run, so clearing
+            # the selection after a removal is deferred to a flag consumed
+            # here, before the multiselect below is created.
+            if st.session_state.pop("_reset_catalog_remove_pick", False):
+                st.session_state["catalog_remove_pick"] = []
+
+            col_rm_select_all, col_rm_clear_all = st.columns(2)
+            with col_rm_select_all:
+                if st.button("Select all", key="catalog_remove_select_all", use_container_width=True):
+                    st.session_state["catalog_remove_pick"] = list(visible_catalog_df.index)
+            with col_rm_clear_all:
+                if st.button("Clear all", key="catalog_remove_clear_all", use_container_width=True):
+                    st.session_state["catalog_remove_pick"] = []
+
+            to_remove_catalog = st.multiselect(
+                "Catalog items to remove",
+                options=list(visible_catalog_df.index),
+                format_func=_format_catalog_removal_choice,
+                key="catalog_remove_pick",
+            )
+            if to_remove_catalog and st.button(f"🗑️ Remove {len(to_remove_catalog)} item(s)", type="primary"):
+                st.session_state.catalog_df = catalog.normalize_catalog_df(
+                    st.session_state.catalog_df.drop(index=to_remove_catalog)
+                )
+                st.session_state["_reset_catalog_remove_pick"] = True
+                st.toast(f"Removed {len(to_remove_catalog)} item(s).", icon="🗑️")
+                st.rerun()
 
     # num_rows="fixed" (not "dynamic") so column-header click-to-sort works.
     # Adding a material happens via "➕ Add a new material" above; removing
-    # happens via the checkbox column, applied below.
+    # happens via the "🗑️ Remove materials" expander above.
     with st.form("catalog_form", border=False):
         edited_catalog = st.data_editor(
-            display_catalog_df,
+            visible_catalog_df,
             num_rows="fixed",
             column_config=catalog_column_config,
             hide_index=True,
@@ -857,11 +913,8 @@ with tab_catalog:
         )
         st.form_submit_button("Apply changes", type="primary")
     with _diagnostics("applying your catalog changes"):
-        to_remove = edited_catalog.index[edited_catalog[REMOVE_COL]]
-        edited_catalog = edited_catalog.drop(columns=[REMOVE_COL])
         catalog_df.loc[edited_catalog.index] = edited_catalog
-        catalog_df = catalog_df.drop(index=to_remove)
-    st.caption("Edit cells above (click a column header to sort), check 🗑️ Remove? on any row you want gone, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
+    st.caption("Edit cells above (click a column header to sort), then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going
     # through recompute_material_totals after its own editor) so a

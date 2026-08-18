@@ -98,13 +98,31 @@ row add/delete moved elsewhere:
   dropdown sourced from the catalog. Materials Catalog rows come from the
   "➕ Add a new material" expander (a small form: Category/Material/Brand/
   Model/UoM/Store/Unit Cost, "Add material" button) above the table.
-- **Deleting**: both tables have a transient `🗑️ Remove?` checkbox column
-  (`REMOVE_COL` in `boq_app.py`) prepended to the display copy right before
-  rendering, never part of the real schema -- check a row, click "Apply
-  changes", and it's dropped from the underlying DataFrame along with
-  whatever other edits were made in the same submission. Stripped back out
-  immediately after the editor returns, before anything touches
-  `st.session_state` or storage, so it can never leak into a saved file.
+- **Deleting**: both tables have a "🗑️ Remove materials" expander above
+  the main table -- a `st.multiselect` of every visible row (label shows
+  enough context to identify it: Category/Material/Store/Qty or Price),
+  with "Select all" / "Clear all" buttons (the same pattern as "Add items
+  from catalog"'s picker) and a "Remove N item(s)" button that deletes
+  them immediately, independent of the main "Apply changes" form. **First
+  attempt was a transient in-grid checkbox column** (check a row, "Apply
+  changes" removes it) -- scrapped after real use surfaced two problems:
+  (1) no way to select/check multiple rows at once or "select all", and
+  (2) even if it had one, checking every box and triggering a rerun would
+  have applied the removal immediately, before the user could review --
+  because the "apply this table's edits" logic below the form already runs
+  unconditionally on every rerun (not gated behind "was submit actually
+  clicked"), which is fine for the form's own deferred-edit batching but
+  doesn't compose safely with an external "select all" action. The
+  multiselect-based picker avoids this entirely: it's a fully separate,
+  explicit action button, not entangled with the grid/form's state at all.
+  One implementation pitfall hit along the way: resetting the multiselect's
+  selection after a removal via `st.session_state[key] = []` **immediately**
+  raises `StreamlitAPIException` if that widget already rendered earlier in
+  the same script run (which it has, since the "Remove" button sits below
+  it) -- a widget's `session_state[key]` can only be reassigned *before*
+  that widget is instantiated in a given run. Fixed by deferring the reset
+  to a plain flag, consumed (and only then applied to the widget's key)
+  right before the multiselect renders on the *next* run.
 
 **Default sort order**: both tables load pre-sorted --
 `boq_data.sort_materials_df()` (Category, then Material, ascending) for
