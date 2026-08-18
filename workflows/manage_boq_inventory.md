@@ -21,17 +21,56 @@ can be reused or tested independently of Streamlit.
 seeding/growing the catalog from a package BOQ file.
 
 ## Layout
-The 📋 BOQ tab keeps the Materials Total / Other Expenses Total / Grand Total
-metrics pinned near the top (right below the title, above everything else)
-so the bottom line is visible without scrolling past the tables — this uses
-a `st.container()` declared early and filled in later in the script, after
-both editors below it have captured the run's edits, so the numbers are
-never stale. Materials, Other Expenses, and Quick price check are each in
-their own bordered card (`st.container(border=True)`) for clear visual
-separation instead of relying only on `st.divider()`. The sidebar groups
-actions by frequency of use: the active project selector plus Save/Export
-sit at the top, then Rename, then the less-frequent New Project / Download
-Template actions below.
+Redesigned (from an earlier version stacking ~9 `st.expander`s on the page)
+around one rule: **the main page shows only what's used constantly** --
+the search/filter bar, the data table, and a short row of buttons -- and
+every occasional/setup action (add, remove, manage stores, manage
+categories, rename a project, create a project) opens a focused `st.dialog`
+modal instead of an inline expander. Prompted by direct user feedback that
+the page was "becoming confusing with many functionalities in multiple
+views." Every dialog's *content* is unchanged from before the redesign
+(same `boq_data.*`/`catalog.*` calls, same session_state keys) -- only the
+container changed, from `st.expander`/`st.container` to a
+`@st.dialog(...)`-decorated function triggered by a button.
+
+Dialog functions are defined as module-level `@st.dialog` functions (near
+the top of `boq_app.py`, after the other helpers) and read/write
+`st.session_state` directly rather than taking parameters -- they're called
+from deep inside the tab bodies further down, so relying on outer-script
+variables isn't an option; anything a dialog needs (e.g. the sorted
+catalog for display) is recomputed locally, which is cheap.
+
+**Trigger buttons need explicit, unique `key=` values.** Streamlit renders
+*every* tab's body on every rerun regardless of which tab is visually
+active (a long-standing fact about `st.tabs`, see "Things learned" below)
+-- so two tabs each having a plain `st.button("🗑️ Remove")` with no `key`
+collided on Streamlit's auto-generated element ID and crashed with
+`StreamlitDuplicateElementId` the moment both tabs' bodies executed in the
+same run (i.e. immediately, on the very first load). Caught by AppTest.
+Every dialog-trigger button in this app has an explicit `key` for exactly
+this reason, even where the label alone looks unique enough at a glance.
+
+The 📋 BOQ tab still keeps the Materials Total / Other Expenses Total /
+Grand Total metrics pinned near the top (right below the title, above
+everything else) via a `st.container()` declared early and filled in later
+in the script, after the editors below it have captured the run's edits.
+Materials and Other Expenses are each in their own bordered card
+(`st.container(border=True)`). The old standalone "🔎 Quick price check"
+section was folded into the new "🔎 Price check" dialog (which now also
+holds the per-material link list) rather than sitting on the main page as
+a separate section.
+
+The sidebar keeps the active project selector plus Save/Export inline
+(used constantly); "✏️ Rename" and "➕ New project" are buttons that open
+dialogs instead of expanders.
+
+Success confirmations that are immediately followed by `st.rerun()` (e.g.
+"Created project", "Renamed") use `st.toast()`, not `st.success()` --
+`st.success()` right before a rerun tends to get cut off before the user
+ever sees it, while `st.toast()` is designed to persist across a rerun.
+This still applies inside dialogs -- `st.rerun()` called from within a
+dialog closes it and refreshes the main page, which is the desired "do the
+action, dialog closes, table updates" flow.
 
 Success confirmations that are immediately followed by `st.rerun()` (e.g.
 "Created project", "Renamed") use `st.toast()`, not `st.success()` —
@@ -90,39 +129,45 @@ have both native column-header click-to-sort *and* `num_rows="dynamic"`
 click a row's trash icon to delete it) -- `num_rows="dynamic"` explicitly
 disables sorting. Since both Materials tables (BOQ Materials, Materials
 Catalog) need to be sortable, both now always run `num_rows="fixed"`, and
-row add/delete moved elsewhere:
-- **Adding**: BOQ Materials rows come from "➕ Add items from catalog"
-  (pick-and-set-quantity) or "➕ Add all materials (lowest price)" (see
-  below) -- there's no "type a new row" option, but there never was a
-  useful one anyway, since `Material` there has always been a closed
-  dropdown sourced from the catalog. Materials Catalog rows come from the
-  "➕ Add a new material" expander (a small form: Category/Material/Brand/
-  Model/UoM/Store/Unit Cost, "Add material" button) above the table.
-- **Deleting**: both tables have a "🗑️ Remove materials" expander above
-  the main table -- a `st.multiselect` of every visible row (label shows
-  enough context to identify it: Category/Material/Store/Qty or Price),
-  with "Select all" / "Clear all" buttons (the same pattern as "Add items
-  from catalog"'s picker) and a "Remove N item(s)" button that deletes
-  them immediately, independent of the main "Apply changes" form. **First
-  attempt was a transient in-grid checkbox column** (check a row, "Apply
-  changes" removes it) -- scrapped after real use surfaced two problems:
-  (1) no way to select/check multiple rows at once or "select all", and
-  (2) even if it had one, checking every box and triggering a rerun would
-  have applied the removal immediately, before the user could review --
-  because the "apply this table's edits" logic below the form already runs
-  unconditionally on every rerun (not gated behind "was submit actually
-  clicked"), which is fine for the form's own deferred-edit batching but
-  doesn't compose safely with an external "select all" action. The
-  multiselect-based picker avoids this entirely: it's a fully separate,
-  explicit action button, not entangled with the grid/form's state at all.
-  One implementation pitfall hit along the way: resetting the multiselect's
-  selection after a removal via `st.session_state[key] = []` **immediately**
-  raises `StreamlitAPIException` if that widget already rendered earlier in
-  the same script run (which it has, since the "Remove" button sits below
-  it) -- a widget's `session_state[key]` can only be reassigned *before*
-  that widget is instantiated in a given run. Fixed by deferring the reset
-  to a plain flag, consumed (and only then applied to the widget's key)
-  right before the multiselect renders on the *next* run.
+row add/delete moved into dialogs (see "Layout" above):
+- **Adding**: the "➕ Add materials" dialog (BOQ tab) has "Pick from
+  catalog" (multiselect + set-quantity, same pattern as before) and "Add
+  all materials (lowest price)" as two clearly separate sections -- these
+  used to be stacked in one confusingly mixed expander. The Materials
+  Catalog's "➕ Add material" dialog is the small Category/Material/Brand/
+  Model/UoM/Store/Unit Cost form.
+- **Deleting**: both tables have a "🗑️ Remove" button opening a dialog with
+  a `st.multiselect` (Select all/Clear all + a "Remove N item(s)" button)
+  -- titled "🗑️ Remove materials" (BOQ) vs "🗑️ Remove catalog items"
+  (Catalog) specifically so the two are distinguishable when referenced
+  out of context (they used to share the identical label "🗑️ Remove
+  materials" as two separate page sections). The removal dialogs list
+  *every* row, not just whatever the main page's search box currently
+  filters to -- deliberately decoupled from that outer search state now
+  that they're dialogs, since `st.multiselect` already supports typing to
+  filter its own option list.
+  **First attempt at deleting was a transient in-grid checkbox column**
+  (check a row, "Apply changes" removes it) -- scrapped after real use
+  surfaced two problems: (1) no way to select/check multiple rows at once
+  or "select all", and (2) even if it had one, checking every box and
+  triggering a rerun would have applied the removal immediately, before
+  the user could review -- because the "apply this table's edits" logic
+  below the form already runs unconditionally on every rerun (not gated
+  behind "was submit actually clicked"), which is fine for the form's own
+  deferred-edit batching but doesn't compose safely with an external
+  "select all" action. The multiselect-based picker avoids this entirely:
+  it's a fully separate, explicit action button, not entangled with the
+  grid/form's state at all. One implementation pitfall hit along the way:
+  resetting the multiselect's selection after a removal via
+  `st.session_state[key] = []` **immediately** raises
+  `StreamlitAPIException` if that widget already rendered earlier in the
+  same script run (which it has, since the "Remove" button sits below it)
+  -- a widget's `session_state[key]` can only be reassigned *before* that
+  widget is instantiated in a given run. Fixed by deferring the reset to a
+  plain flag, consumed (and only then applied to the widget's key) right
+  before the multiselect renders on the *next* run. This fix is unaffected
+  by later moving the whole thing into a dialog -- dialogs don't change
+  widget/session_state semantics at all.
 
 **Default sort order**: both tables load pre-sorted --
 `boq_data.sort_materials_df()` (Category, then Material, ascending) for
@@ -608,3 +653,49 @@ automatically based on whether Google credentials are configured, via
   ever deduplicating repeated ones, can silently pass a malformed shape
   through for years until something (like a `.str` accessor) finally
   doesn't tolerate it.
+- **Sorting silently broke the "unsaved changes" dirty indicator**,
+  discovered while testing the dialog-based UI redesign (opening a dialog
+  that touched none of the Materials Catalog's own data still flipped
+  "✅ Save catalog" to "🟠 Save catalog*"). Root cause: the sort-for-display
+  local variable (`sort_catalog_df`/`sort_materials_df`'s return value) was
+  being written straight back into `st.session_state.catalog_df`/
+  `materials_df` at the end of every "Apply changes" pass -- which runs
+  unconditionally on every rerun, not just after an actual edit (see the
+  Apply-vs-Save note above). Since `DataFrame.equals()` (what the dirty
+  check uses) cares about row *order*, not just values, persisting a
+  resort every rerun permanently diverges the session's copy from the
+  load-time snapshot after the very first rerun, even with zero real
+  edits. Confirmed via `git stash` that this predated the redesign
+  entirely (already reproducible by simply expanding the old "Manage
+  stores & categories" expander) -- the redesign just made it trivially
+  easy to trigger (open any dialog) and therefore impossible to miss.
+  Fixed by keeping the sorted DataFrame strictly local/display-only: the
+  canonical `st.session_state.materials_df`/`catalog_df` is read and
+  merged-back-into in its original (unsorted) order, and a *separate*
+  local variable (`sorted_materials_df`/`sorted_catalog_df`) is what
+  actually gets rendered in the `data_editor`. Lesson: a "sort for
+  display" operation must never be the thing that also gets written back
+  as the source of truth, or every dirty/snapshot comparison built on that
+  source of truth breaks silently.
+- **`streamlit.testing.v1.AppTest` cannot drive more than one interaction
+  inside an already-open `st.dialog`.** Confirmed with a minimal repro (a
+  dialog with just an increment button): the first click that opens the
+  dialog renders correctly and its widgets are visible in `at.button`/
+  `at.text_input`/etc., but *any* second interaction -- another button
+  click, a text input change, staged before or after the first `.run()`,
+  it doesn't matter -- is silently dropped: the dialog's Python function
+  body simply doesn't re-execute for that run, so nothing inside it (not
+  even a plain `st.session_state.counter += 1`) happens, and no exception
+  is raised either. This is a harness limitation (real browsers keep a
+  dialog open across any rerun triggered from inside it), not an app bug.
+  Practical effect on this project: multi-step dialog flows (Select all →
+  Remove, fill in a form → submit) can be verified for their *first* step
+  only via AppTest -- confirm the dialog opens without error and shows the
+  right initial content (optionally with `st.session_state` pre-seeded to
+  simulate "as if step 1 already happened", to check step 2's rendering
+  logic in isolation) -- but the actual click-through end-to-end needs a
+  real browser (`streamlit run tools/boq_app.py`) or the user's own
+  smoke test. Every dialog in this app reuses logic that was already
+  verified working as plain page content (pre-dialog) or as standalone
+  Python functions, which is the basis for confidence here despite the
+  gap in this specific harness's coverage.
