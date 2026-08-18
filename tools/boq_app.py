@@ -3,7 +3,9 @@
 Run with: streamlit run tools/boq_app.py
 """
 
+import contextlib
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -124,23 +126,34 @@ def _catalog_bundle_dirty() -> bool:
         return True
 
 
-def _load_with_diagnostics(label: str, fn):
+@contextlib.contextmanager
+def _diagnostics(label: str):
     """Streamlit Cloud redacts the real exception message/traceback from
     any *uncaught* error before showing it to the user ("This app has
     encountered an error... redacted to prevent data leaks"), which makes
     genuinely diagnosing a production-only failure (one that doesn't
-    reproduce locally) close to impossible from the outside. Catching it
-    ourselves and displaying it via st.error() bypasses that redaction --
-    st.error() is our own explicit output, not an uncaught crash, so it
-    isn't touched by it -- then st.stop() halts cleanly instead of
-    crashing further up into Streamlit's generic error screen."""
+    reproduce locally, e.g. because of a Python-version or dependency
+    difference between here and the deploy target) close to impossible
+    from the outside. Catching it ourselves and displaying it via
+    st.error()/st.code() bypasses that redaction -- those are our own
+    explicit output, not an uncaught crash, so Streamlit's redaction
+    doesn't touch them -- then st.stop() halts cleanly instead of
+    crashing further up into Streamlit's generic error screen.
+
+    Use as `with _diagnostics("doing X"): ...` around any block, not just
+    a single call -- e.g. the multi-step "apply this table's edits" logic,
+    where the exact failing line matters for diagnosis."""
     try:
-        return fn()
+        yield
     except Exception:
-        import traceback
-        st.error(f"Failed to load {label}. Full details below -- please copy/paste this if reporting it:")
+        st.error(f"Something went wrong while {label}. Full details below -- please copy/paste this if reporting it:")
         st.code(traceback.format_exc())
         st.stop()
+
+
+def _load_with_diagnostics(label: str, fn):
+    with _diagnostics(f"loading {label}"):
+        return fn()
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -545,10 +558,11 @@ with tab_boq:
                         key="materials_editor_filtered",
                     )
                     st.form_submit_button("Apply changes", type="primary")
-                materials_df.loc[edited.index] = edited
-                materials_df = boq_data.apply_material_categories(materials_df, st.session_state.material_list_df)
-                materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
-                materials_df = boq_data.recompute_material_totals(materials_df)
+                with _diagnostics("applying your Materials changes"):
+                    materials_df.loc[edited.index] = edited
+                    materials_df = boq_data.apply_material_categories(materials_df, st.session_state.material_list_df)
+                    materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
+                    materials_df = boq_data.recompute_material_totals(materials_df)
             else:
                 with st.form("materials_form", border=False):
                     edited = st.data_editor(
@@ -558,9 +572,10 @@ with tab_boq:
                         key="materials_editor",
                     )
                     st.form_submit_button("Apply changes", type="primary")
-                edited = boq_data.apply_material_categories(edited, st.session_state.material_list_df)
-                materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
-                materials_df = boq_data.recompute_material_totals(materials_df)
+                with _diagnostics("applying your Materials changes"):
+                    edited = boq_data.apply_material_categories(edited, st.session_state.material_list_df)
+                    materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
+                    materials_df = boq_data.recompute_material_totals(materials_df)
 
             for w in pricing_warnings:
                 st.warning(w)
@@ -769,7 +784,8 @@ with tab_catalog:
                 key="catalog_editor_filtered",
             )
             st.form_submit_button("Apply changes", type="primary")
-        catalog_df.loc[edited_catalog.index] = edited_catalog
+        with _diagnostics("applying your catalog changes"):
+            catalog_df.loc[edited_catalog.index] = edited_catalog
     else:
         with st.form("catalog_form", border=False):
             catalog_df = st.data_editor(
@@ -779,7 +795,8 @@ with tab_catalog:
                 key="catalog_editor",
             )
             st.form_submit_button("Apply changes", type="primary")
-    catalog_df = boq_data.apply_material_categories(catalog_df, st.session_state.material_list_df)
+    with _diagnostics("applying your catalog changes"):
+        catalog_df = boq_data.apply_material_categories(catalog_df, st.session_state.material_list_df)
     st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going
