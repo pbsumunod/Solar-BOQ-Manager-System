@@ -190,19 +190,48 @@ the tab's "⚙️ Manage stores, categories & materials" expander:
   existing store's entire catalog (all rows, including prices) as a
   starting point to edit from — mirrors the existing sidebar "Copy from
   existing project" pattern.
-- **Categories** / **Materials** (`catalog.CATEGORY_LIST_COLUMNS`/
-  `MATERIAL_LIST_COLUMNS`, one text column each): flat, independent lists —
-  Material doesn't "belong to" a Category. Deliberately not hierarchical:
-  `st.column_config.SelectboxColumn` takes one static option list per
-  column with no cascading/dependent-dropdown support, and this app's
-  `st.form`-batched editors can't reactively rebuild `column_config`
-  mid-form anyway, so a flat list needs zero extra plumbing and satisfies
-  the actual goal (consistent Material naming for cross-store lookups)
-  exactly as well as a hierarchical one would.
-- All three master lists dedupe case-insensitively (keeping the first
+- **Categories** (`catalog.CATEGORY_LIST_COLUMNS = ["Category"]`): a flat
+  list, edited via its own small `st.data_editor`.
+- **Materials** (`catalog.MATERIAL_LIST_COLUMNS = ["Category", "Material"]`)
+  is a **Category → Material mapping**, not a flat list — every Material
+  has exactly one Category, and its own editor requires picking a Category
+  (`st.column_config.SelectboxColumn(..., required=True)`) whenever a new
+  Material is added, sourced from the Categories list above. This is
+  deliberately one-directional: Categories don't reference Materials, only
+  Materials reference a Category, which keeps the whole thing a simple flat
+  table rather than needing `st.column_config.SelectboxColumn`'s lack of
+  cascading/dependent-dropdown support to somehow filter the Material
+  options by a previously-picked Category (not attempted, and not needed
+  for this to work).
+- **`boq_data.apply_material_categories(df, material_list_df)`** is what
+  makes the mapping actually apply: on every "Apply changes" (same
+  insertion point as `apply_store_pricing`, right before
+  `recompute_material_totals`, in the BOQ Materials table *and* the main
+  Materials Catalog editor), each row's `Category` gets overwritten from
+  its `Material`'s mapped Category. Because of this, `Category` is a
+  **disabled/derived column** in both of those tables
+  (`st.column_config.TextColumn(disabled=True)`, not a `SelectboxColumn`)
+  — the same "derived fields aren't independently editable" principle
+  `Total Cost (₱)` already uses, extended here so Category can never drift
+  out of sync with what the Material actually is. A Material with no
+  mapping entry keeps its existing Category unchanged rather than getting
+  blanked out (same non-destructive philosophy as the pricing lookup) —
+  though in practice this shouldn't happen, since `Material` is itself a
+  `SelectboxColumn` sourced only from this same mapping, so anything
+  pickable already has a Category.
+- **`catalog.sync_reference_lists_from_catalog(catalog_df, category_list_df,
+  material_list_df)`**: given a catalog (or newly parsed/imported rows),
+  adds any Category/Material pairs not already in the respective lists —
+  never removes or overwrites existing entries. Shared by
+  `tools/import_catalog_from_workbook.py` (so a freshly imported material
+  is immediately selectable, not just present in the flat catalog) and the
+  migration script's initial seeding.
+- All master lists dedupe case-insensitively (keeping the first
   occurrence's casing) via `catalog.normalize_stores_df` /
-  `catalog.normalize_simple_list_df` — "Panels" and "panels" never both
-  survive as separate entries.
+  `catalog.normalize_simple_list_df` (Categories) /
+  `catalog.normalize_material_list_df` (Materials, dedupes on `Material`
+  only — `Category` rides along with whichever row for that Material
+  survives) — "Panels" and "panels" never both survive as separate entries.
 
 **Storage layout differs by backend, deliberately**: locally, Stores/
 Categories/Materials each live in their own small file
@@ -445,3 +474,14 @@ automatically based on whether Google credentials are configured, via
   `*_store.create_*` function directly (persists for real) versus only
   mutating `st.session_state` (safe, session-local) -- this project's own
   Apply-vs-Save split (see above) is precisely the distinction to check for.
+- The Category<->Material mapping was added *after* the flat Category/
+  Material lists were already shipped and the catalog already had real
+  Category-Material pairs for all 50 items -- so "map the materials by
+  category, using the current data" was purely a backfill: the catalog
+  itself was already the ground truth, `migrate_material_list_raw()` just
+  needed to read it and fill in the previously-flat Material list's new
+  Category column. No manual re-categorization was needed. Worth
+  remembering if a similar "add structure to already-populated data"
+  request comes up again -- check whether some *other* part of the
+  existing data already implies the answer before asking the user to
+  redo work by hand.

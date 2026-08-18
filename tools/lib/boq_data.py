@@ -227,6 +227,31 @@ def apply_store_pricing(materials_df: pd.DataFrame, catalog_df: pd.DataFrame) ->
     return df, warnings
 
 
+def apply_material_categories(df: pd.DataFrame, material_list_df: pd.DataFrame) -> pd.DataFrame:
+    """Category is derived from Material via the Category<->Material
+    mapping (the "Manage stores, categories & materials" master list) --
+    same "pick X, Y follows" pattern as apply_store_pricing() for
+    Store -> Unit Cost, applied at the same point (right before
+    recompute_material_totals, on every "Apply changes"). A Material with
+    no mapping entry (e.g. not yet added to the master list, or a
+    still-blank just-added row) keeps its current Category unchanged
+    rather than getting blanked out."""
+    df = df.copy()
+    if material_list_df is None or material_list_df.empty or "Material" not in df.columns:
+        return df
+
+    category_lookup = {
+        str(row["Material"]).strip(): str(row["Category"]).strip() for _, row in material_list_df.iterrows()
+    }
+
+    for i, row in df.iterrows():
+        material = str(row.get("Material", "")).strip()
+        if material in category_lookup and category_lookup[material]:
+            df.at[i, "Category"] = category_lookup[material]
+
+    return df
+
+
 def materials_total(df: pd.DataFrame) -> float:
     if df.empty or "Total Cost (₱)" not in df.columns:
         return 0.0

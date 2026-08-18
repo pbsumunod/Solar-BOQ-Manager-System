@@ -25,7 +25,12 @@ MATERIAL_LIST_PATH = PROJECT_ROOT / "data" / "material_list.xlsx"
 CATALOG_COLUMNS = ["Category", "Material", "Brand", "Model", "Unit of Measurement", "Store Name", "Unit Cost (₱)"]
 STORES_COLUMNS = ["Store Name", "Address"]
 CATEGORY_LIST_COLUMNS = ["Category"]
-MATERIAL_LIST_COLUMNS = ["Material"]
+# Material list is a Category->Material mapping, not a flat list -- every
+# material has exactly one Category. Column order is Category-first so a
+# data_editor reads "pick the category, then name the material" left to
+# right, matching the "adding a material requires selecting a category"
+# workflow this exists to enforce.
+MATERIAL_LIST_COLUMNS = ["Category", "Material"]
 
 # The store name new/legacy Materials rows default to when their actual
 # source store is unknown -- deliberately NOT a real store name (e.g. not
@@ -311,9 +316,70 @@ def blank_material_list_df() -> pd.DataFrame:
     return pd.DataFrame(columns=MATERIAL_LIST_COLUMNS)
 
 
+def normalize_material_list_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Unlike normalize_simple_list_df (one column, no identity beyond the
+    value itself), the material list has two columns and dedupes on
+    Material only -- Category rides along with whichever row for that
+    Material survives the dedup, since a Material has exactly one
+    Category."""
+    df = df.copy()
+    for col in MATERIAL_LIST_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    for col in MATERIAL_LIST_COLUMNS:
+        df[col] = df[col].fillna("").astype(str).str.strip()
+    df = df[df["Material"] != ""]
+    df = df.loc[~df["Material"].str.lower().duplicated()]
+    df = df.sort_values("Material", key=lambda s: s.str.lower())
+    return df[MATERIAL_LIST_COLUMNS].reset_index(drop=True)
+
+
 def load_material_list() -> pd.DataFrame:
-    return _load_simple_list(MATERIAL_LIST_PATH, "Material List", "Material")
+    if not MATERIAL_LIST_PATH.exists():
+        return blank_material_list_df()
+    df = pd.read_excel(MATERIAL_LIST_PATH, sheet_name="Material List", engine="openpyxl")
+    return normalize_material_list_df(df)
 
 
 def save_material_list(df: pd.DataFrame) -> Path:
-    return _save_simple_list(df, MATERIAL_LIST_PATH, "Material List", "Material")
+    MATERIAL_LIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    df = normalize_material_list_df(df)
+    df.to_excel(MATERIAL_LIST_PATH, sheet_name="Material List", index=False, engine="openpyxl")
+    return MATERIAL_LIST_PATH
+
+
+def sync_reference_lists_from_catalog(
+    catalog_df: pd.DataFrame, category_list_df: pd.DataFrame, material_list_df: pd.DataFrame
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Ensure every Category and (Material -> Category) pair present in
+    catalog_df has a corresponding entry in the Category/Material lists --
+    adding whatever's missing, never removing or overwriting anything
+    already there. Shared by the catalog importer (tools/import_catalog_
+    from_workbook.py) and the multi-store migration script, so a newly
+    imported material is always immediately selectable in the strict
+    Category/Material dropdowns, not just present in the flat catalog."""
+    existing_cats = {c.lower() for c in category_list_df["Category"]}
+    new_cats = sorted({c for c in catalog_df["Category"] if c and c.lower() not in existing_cats})
+    if new_cats:
+        category_list_df = pd.concat(
+            [category_list_df, pd.DataFrame({"Category": new_cats})], ignore_index=True
+        )
+        category_list_df = normalize_simple_list_df(category_list_df, "Category")
+
+    existing_mats = {m.lower() for m in material_list_df["Material"]}
+    new_mat_rows = []
+    seen = set()
+    for _, row in catalog_df.iterrows():
+        material = str(row.get("Material", "")).strip()
+        key = material.lower()
+        if not material or key in existing_mats or key in seen:
+            continue
+        seen.add(key)
+        new_mat_rows.append({"Category": str(row.get("Category", "")).strip(), "Material": material})
+    if new_mat_rows:
+        material_list_df = pd.concat(
+            [material_list_df, pd.DataFrame(new_mat_rows, columns=MATERIAL_LIST_COLUMNS)], ignore_index=True
+        )
+        material_list_df = normalize_material_list_df(material_list_df)
+
+    return category_list_df, material_list_df

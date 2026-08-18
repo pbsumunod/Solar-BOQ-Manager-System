@@ -238,11 +238,11 @@ def save_category_list(df: pd.DataFrame) -> str:
 def load_material_list() -> pd.DataFrame:
     ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(MATERIAL_LIST_SHEET)
     df = _worksheet_to_df(ws, catalog.MATERIAL_LIST_COLUMNS)
-    return catalog.normalize_simple_list_df(df, "Material")
+    return catalog.normalize_material_list_df(df)
 
 
 def save_material_list(df: pd.DataFrame) -> str:
-    df = catalog.normalize_simple_list_df(df, "Material")
+    df = catalog.normalize_material_list_df(df)
     ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(MATERIAL_LIST_SHEET)
     _write_df(ws, df)
     return _state["catalog_spreadsheet_id"]

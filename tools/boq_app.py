@@ -515,9 +515,13 @@ with tab_boq:
                         st.caption("No custom columns yet.")
 
             column_config = {
-                "Category": st.column_config.SelectboxColumn(
-                    "Category", options=st.session_state.category_list_df["Category"].tolist(), required=False
-                ),
+                # Category is derived from Material (apply_material_categories,
+                # below) via the Category<->Material mapping, the same
+                # "pick X, Y follows" pattern as Store -> Unit Cost -- so it's
+                # disabled here rather than an independently pickable field,
+                # which would let it drift out of sync with what the
+                # material actually is.
+                "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Material": st.column_config.SelectboxColumn(
                     "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
                 ),
@@ -542,6 +546,7 @@ with tab_boq:
                     )
                     st.form_submit_button("Apply changes", type="primary")
                 materials_df.loc[edited.index] = edited
+                materials_df = boq_data.apply_material_categories(materials_df, st.session_state.material_list_df)
                 materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
                 materials_df = boq_data.recompute_material_totals(materials_df)
             else:
@@ -553,6 +558,7 @@ with tab_boq:
                         key="materials_editor",
                     )
                     st.form_submit_button("Apply changes", type="primary")
+                edited = boq_data.apply_material_categories(edited, st.session_state.material_list_df)
                 materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
                 materials_df = boq_data.recompute_material_totals(materials_df)
 
@@ -714,18 +720,27 @@ with tab_catalog:
             st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
         with col_mat_list:
             st.markdown("**Materials**")
+            st.caption("Category is required — it's what auto-fills Category wherever this Material is used.")
             edited_mat_list = st.data_editor(
-                st.session_state.material_list_df, num_rows="dynamic", hide_index=True, key="material_list_editor"
+                st.session_state.material_list_df,
+                num_rows="dynamic",
+                hide_index=True,
+                column_config={
+                    "Category": st.column_config.SelectboxColumn(
+                        "Category", options=st.session_state.category_list_df["Category"].tolist(), required=True
+                    ),
+                },
+                key="material_list_editor",
             )
-            st.session_state.material_list_df = catalog.normalize_simple_list_df(edited_mat_list, "Material")
+            st.session_state.material_list_df = catalog.normalize_material_list_df(edited_mat_list)
 
     catalog_df = st.session_state.catalog_df
     catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {
-        "Category": st.column_config.SelectboxColumn(
-            "Category", options=st.session_state.category_list_df["Category"].tolist(), required=True
-        ),
+        # Derived from Material via apply_material_categories(), same as
+        # the BOQ Materials table -- disabled here for the same reason.
+        "Category": st.column_config.TextColumn("Category", disabled=True),
         "Material": st.column_config.SelectboxColumn(
             "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
         ),
@@ -764,6 +779,7 @@ with tab_catalog:
                 key="catalog_editor",
             )
             st.form_submit_button("Apply changes", type="primary")
+    catalog_df = boq_data.apply_material_categories(catalog_df, st.session_state.material_list_df)
     st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going
