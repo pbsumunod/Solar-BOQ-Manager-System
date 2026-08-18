@@ -19,11 +19,13 @@ that data from st.secrets or a local token.json.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 
 import gspread
 import pandas as pd
 from google.oauth2.credentials import Credentials
+from gspread.exceptions import APIError
 
 from . import boq_data, catalog
 
@@ -69,13 +71,47 @@ def _client() -> gspread.Client:
     return _state["client"]
 
 
+# Google's Sheets API intermittently returns a transient 5xx (or a 429
+# rate-limit) on an otherwise completely normal, well-formed request --
+# confirmed live via `APIError: [500]: Internal error encountered` on a
+# plain read, with no app-side bug involved. Google's own guidance is to
+# retry these with exponential backoff rather than treat them as a real
+# failure. Every Sheets API call in this module goes through _retry() so
+# one flaky response doesn't crash the whole app.
+_TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 4
+_RETRY_BASE_DELAY = 1.5
+
+
+def _retry(fn):
+    last_error = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            return fn()
+        except APIError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status not in _TRANSIENT_STATUS_CODES or attempt == _MAX_RETRIES - 1:
+                raise
+            last_error = e
+            time.sleep(_RETRY_BASE_DELAY * (2**attempt))
+    raise last_error  # pragma: no cover -- loop above always returns or raises
+
+
+def _open_spreadsheet(spreadsheet_id: str):
+    return _retry(lambda: _client().open_by_key(spreadsheet_id))
+
+
+def _open_worksheet(spreadsheet_id: str, sheet_name: str):
+    return _retry(lambda: _client().open_by_key(spreadsheet_id).worksheet(sheet_name))
+
+
 def _df_to_rows(df: pd.DataFrame) -> list:
     body = df.astype(object).where(pd.notna(df), "").values.tolist()
     return [list(df.columns)] + body
 
 
 def _worksheet_to_df(ws, expected_columns: list) -> pd.DataFrame:
-    values = ws.get_all_values()
+    values = _retry(lambda: ws.get_all_values())
     if len(values) < 2:
         return pd.DataFrame(columns=expected_columns)
     header, *rows = values
@@ -83,12 +119,12 @@ def _worksheet_to_df(ws, expected_columns: list) -> pd.DataFrame:
 
 
 def _write_df(ws, df: pd.DataFrame) -> None:
-    ws.clear()
-    ws.update(_df_to_rows(df), value_input_option="USER_ENTERED")
+    _retry(lambda: ws.clear())
+    _retry(lambda: ws.update(_df_to_rows(df), value_input_option="USER_ENTERED"))
 
 
 def _meta_from_worksheet(ws) -> dict:
-    values = ws.get_all_values()
+    values = _retry(lambda: ws.get_all_values())
     meta = {}
     for row in values[1:]:
         if row and row[0]:
@@ -97,9 +133,9 @@ def _meta_from_worksheet(ws) -> dict:
 
 
 def _write_meta(ws, meta: dict) -> None:
-    ws.clear()
+    _retry(lambda: ws.clear())
     rows = [["key", "value"]] + [[k, v] for k, v in meta.items()]
-    ws.update(rows, value_input_option="USER_ENTERED")
+    _retry(lambda: ws.update(rows, value_input_option="USER_ENTERED"))
 
 
 # ---------------------------------------------------------------------------
@@ -110,11 +146,11 @@ def _write_meta(ws, meta: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def list_projects() -> list[dict]:
-    files = _client().list_spreadsheet_files(folder_id=_state["projects_folder_id"])
+    files = _retry(lambda: _client().list_spreadsheet_files(folder_id=_state["projects_folder_id"]))
     projects = []
     for f in files:
         try:
-            meta = _meta_from_worksheet(_client().open_by_key(f["id"]).worksheet(META_SHEET))
+            meta = _meta_from_worksheet(_open_worksheet(f["id"], META_SHEET))
         except Exception:
             meta = {}
         projects.append(
@@ -130,24 +166,24 @@ def list_projects() -> list[dict]:
 
 
 def load_project(slug: str) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
-    sh = _client().open_by_key(slug)
-    materials_df = _worksheet_to_df(sh.worksheet(MATERIALS_SHEET), boq_data.CORE_MATERIAL_COLUMNS)
-    expenses_df = _worksheet_to_df(sh.worksheet(EXPENSES_SHEET), boq_data.CORE_EXPENSE_COLUMNS)
-    meta = _meta_from_worksheet(sh.worksheet(META_SHEET))
+    sh = _open_spreadsheet(slug)
+    materials_df = _worksheet_to_df(_retry(lambda: sh.worksheet(MATERIALS_SHEET)), boq_data.CORE_MATERIAL_COLUMNS)
+    expenses_df = _worksheet_to_df(_retry(lambda: sh.worksheet(EXPENSES_SHEET)), boq_data.CORE_EXPENSE_COLUMNS)
+    meta = _meta_from_worksheet(_retry(lambda: sh.worksheet(META_SHEET)))
     materials_df, _ = boq_data.validate_and_normalize_materials(materials_df)
     expenses_df = boq_data.validate_and_normalize_expenses(expenses_df)
     return materials_df, expenses_df, meta
 
 
 def save_project(slug: str, materials_df: pd.DataFrame, expenses_df: pd.DataFrame, meta: dict) -> str:
-    sh = _client().open_by_key(slug)
+    sh = _open_spreadsheet(slug)
     materials_df = boq_data.recompute_material_totals(materials_df)
     meta = dict(meta)
     meta["last_modified_at"] = datetime.now().isoformat(timespec="seconds")
     meta.setdefault("schema_version", boq_data.SCHEMA_VERSION)
-    _write_df(sh.worksheet(MATERIALS_SHEET), materials_df)
-    _write_df(sh.worksheet(EXPENSES_SHEET), expenses_df)
-    _write_meta(sh.worksheet(META_SHEET), meta)
+    _write_df(_retry(lambda: sh.worksheet(MATERIALS_SHEET)), materials_df)
+    _write_df(_retry(lambda: sh.worksheet(EXPENSES_SHEET)), expenses_df)
+    _write_meta(_retry(lambda: sh.worksheet(META_SHEET)), meta)
     return slug
 
 
@@ -161,13 +197,13 @@ def create_project(
     )
     expenses_df = expenses_df if expenses_df is not None else boq_data.blank_expenses_df()
 
-    sh = _client().create(name.strip(), folder_id=_state["projects_folder_id"])
+    sh = _retry(lambda: _client().create(name.strip(), folder_id=_state["projects_folder_id"]))
     default_ws = sh.sheet1
 
-    ws_materials = sh.add_worksheet(MATERIALS_SHEET, rows=200, cols=max(len(materials_df.columns) + 2, 10))
-    ws_expenses = sh.add_worksheet(EXPENSES_SHEET, rows=100, cols=5)
-    ws_meta = sh.add_worksheet(META_SHEET, rows=20, cols=2)
-    sh.del_worksheet(default_ws)
+    ws_materials = _retry(lambda: sh.add_worksheet(MATERIALS_SHEET, rows=200, cols=max(len(materials_df.columns) + 2, 10)))
+    ws_expenses = _retry(lambda: sh.add_worksheet(EXPENSES_SHEET, rows=100, cols=5))
+    ws_meta = _retry(lambda: sh.add_worksheet(META_SHEET, rows=20, cols=2))
+    _retry(lambda: sh.del_worksheet(default_ws))
 
     now = datetime.now().isoformat(timespec="seconds")
     meta = {
@@ -188,14 +224,14 @@ def create_project(
 # ---------------------------------------------------------------------------
 
 def load_catalog() -> pd.DataFrame:
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(CATALOG_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], CATALOG_SHEET)
     df = _worksheet_to_df(ws, catalog.CATALOG_COLUMNS)
     return catalog.normalize_catalog_df(df)
 
 
 def save_catalog(df: pd.DataFrame) -> str:
     df = catalog.normalize_catalog_df(df)
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(CATALOG_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], CATALOG_SHEET)
     _write_df(ws, df)
     return _state["catalog_spreadsheet_id"]
 
@@ -209,26 +245,26 @@ def save_catalog(df: pd.DataFrame) -> str:
 # ---------------------------------------------------------------------------
 
 def load_stores() -> pd.DataFrame:
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(STORES_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], STORES_SHEET)
     df = _worksheet_to_df(ws, catalog.STORES_COLUMNS)
     return catalog.normalize_stores_df(df)
 
 
 def save_stores(df: pd.DataFrame) -> str:
     df = catalog.normalize_stores_df(df)
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(STORES_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], STORES_SHEET)
     _write_df(ws, df)
     return _state["catalog_spreadsheet_id"]
 
 
 def load_category_list() -> pd.DataFrame:
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(CATEGORIES_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], CATEGORIES_SHEET)
     df = _worksheet_to_df(ws, catalog.CATEGORY_LIST_COLUMNS)
     return catalog.normalize_simple_list_df(df, "Category")
 
 
 def save_category_list(df: pd.DataFrame) -> str:
     df = catalog.normalize_simple_list_df(df, "Category")
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(CATEGORIES_SHEET)
+    ws = _open_worksheet(_state["catalog_spreadsheet_id"], CATEGORIES_SHEET)
     _write_df(ws, df)
     return _state["catalog_spreadsheet_id"]

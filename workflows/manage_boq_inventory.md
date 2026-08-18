@@ -483,3 +483,29 @@ automatically based on whether Google credentials are configured, via
   prefer deriving it on read over maintaining a second copy that can go
   stale -- and don't hesitate to walk back a recently-added structure once
   that becomes clear, rather than layering more sync logic on top of it.
+- **Root cause of the deployed app's repeated crashes, finally confirmed**:
+  widening `_diagnostics` to wrap the Apply-changes blocks (see above)
+  surfaced the real, previously-redacted exception -- `gspread.exceptions.
+  APIError: [500]: Internal error encountered` from a plain
+  `load_catalog()` call, i.e. Google's Sheets API itself returning a
+  transient server-side error on an otherwise valid, well-formed request.
+  This is common and expected under normal load per Google's own API
+  guidance (retry with exponential backoff), not a sign of a bug in this
+  app's code -- and it's the likely explanation for the earlier, differently
+  -shaped `AttributeError` crashes too: gspread/its HTTP layer can surface
+  a transient server error as an oddly-typed exception depending on exactly
+  where in a chained call (`open_by_key(...).worksheet(...)`) it lands,
+  rather than a clean `APIError` every time. Fixed by adding a `_retry()`
+  helper in `gsheets_storage.py` (exponential backoff, up to 4 attempts,
+  only for `{429, 500, 502, 503, 504}`; anything else -- e.g. a real 404 --
+  raises immediately) and routing every Sheets API call in that module
+  through it, including the ones inside `_worksheet_to_df`/`_write_df`/
+  `_meta_from_worksheet`/`_write_meta` that take an already-opened
+  worksheet object. Verified with a mocked `APIError` (transient → retries
+  then succeeds; non-transient → raises on first attempt; persistent
+  transient → exhausts retries and raises) since this can't be triggered
+  on demand against the real API. Lesson: when a Streamlit Cloud crash
+  can't be reproduced locally and looks structurally weird (wrong
+  exception type for the apparent cause), suspect the underlying API
+  itself being flaky before assuming an app-logic bug -- surfacing the
+  real traceback (not guessing) is what made this diagnosable at all.
