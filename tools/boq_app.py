@@ -671,7 +671,7 @@ with tab_catalog:
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
             st.rerun()
 
-    with st.expander("⚙️ Manage stores, categories & materials"):
+    with st.expander("⚙️ Manage stores & categories"):
         st.markdown("**Stores**")
         edited_stores = st.data_editor(
             stores_df,

@@ -180,7 +180,7 @@ consumable items don't have one and leave it blank — only major equipment
 like panels/inverters typically do).
 
 **Stores and Categories — two more editable master lists**, under the tab's
-"⚙️ Manage stores, categories & materials" expander:
+"⚙️ Manage stores & categories" expander:
 - **Stores** (`catalog.STORES_COLUMNS = ["Store Name", "Address"]`,
   `load_stores`/`save_stores`/`ensure_store_exists`): unique on Store Name
   (case-insensitive). Each store with a non-blank Address gets a
