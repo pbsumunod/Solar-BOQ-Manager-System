@@ -38,7 +38,6 @@ META_SHEET = "Meta"
 CATALOG_SHEET = "Catalog"
 STORES_SHEET = "Stores"
 CATEGORIES_SHEET = "Categories"
-MATERIAL_LIST_SHEET = "Material List"
 
 _state: dict = {"client": None, "projects_folder_id": None, "catalog_spreadsheet_id": None}
 
@@ -202,11 +201,11 @@ def save_catalog(df: pd.DataFrame) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Stores / Category list / Material list -- three more tabs on the same
-# catalog Spreadsheet (no new secret/ID needed). Tabs are assumed to
-# already exist, same assumption load_project's worksheet() calls already
-# make -- creating them is setup_google_auth.py's / the migration script's
-# job, not something these functions self-heal on every call.
+# Stores / Category list -- two more tabs on the same catalog Spreadsheet
+# (no new secret/ID needed). Tabs are assumed to already exist, same
+# assumption load_project's worksheet() calls already make -- creating
+# them is setup_google_auth.py's / the migration script's job, not
+# something these functions self-heal on every call.
 # ---------------------------------------------------------------------------
 
 def load_stores() -> pd.DataFrame:
@@ -231,18 +230,5 @@ def load_category_list() -> pd.DataFrame:
 def save_category_list(df: pd.DataFrame) -> str:
     df = catalog.normalize_simple_list_df(df, "Category")
     ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(CATEGORIES_SHEET)
-    _write_df(ws, df)
-    return _state["catalog_spreadsheet_id"]
-
-
-def load_material_list() -> pd.DataFrame:
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(MATERIAL_LIST_SHEET)
-    df = _worksheet_to_df(ws, catalog.MATERIAL_LIST_COLUMNS)
-    return catalog.normalize_material_list_df(df)
-
-
-def save_material_list(df: pd.DataFrame) -> str:
-    df = catalog.normalize_material_list_df(df)
-    ws = _client().open_by_key(_state["catalog_spreadsheet_id"]).worksheet(MATERIAL_LIST_SHEET)
     _write_df(ws, df)
     return _state["catalog_spreadsheet_id"]

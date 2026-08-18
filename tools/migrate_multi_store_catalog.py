@@ -4,12 +4,12 @@ What this does:
   1. Renames the catalog's "Default Unit Cost (₱)" column to "Unit Cost (₱)"
      and backfills every existing catalog row's "Store Name" to "Plug and
      Go" (the store the original 50-item catalog came from).
-  2. Seeds the Stores / Categories / Material List reference data from the
-     catalog's current distinct values (Stores gets "Plug and Go" with a
-     blank Address -- fill it in later via "Manage stores"), and backfills
-     "Category" on any Material List entries that predate the
-     Category<->Material mapping, using the catalog's existing
-     Category-Material pairs as the source of truth.
+  2. Seeds the Stores / Categories reference data from the catalog's
+     current distinct values (Stores gets "Plug and Go" with a blank
+     Address -- fill it in later via "Manage stores"). The Category<->
+     Material mapping itself needs no separate seeding or backfill: it's
+     derived directly from the catalog's own Category/Material columns,
+     not stored anywhere else.
   3. Backfills "Store Name" = "Plug and Go" on every existing Materials row
      of the local sample-project (and, with --sheets, the live "6.6 kWp PV
      rooftop project").
@@ -90,35 +90,6 @@ def migrate_materials_df_raw(df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
     return _backfill_store_name(df)
 
 
-def migrate_material_list_raw(df: pd.DataFrame, catalog_df: pd.DataFrame) -> tuple[pd.DataFrame, bool]:
-    """Backfill "Category" on a material list that predates the
-    Category<->Material mapping (a flat, single-column "Material" list),
-    using the catalog's existing Category-Material pairs as the source of
-    truth ("refer to the existing data for the mapping"). Never overwrites
-    a Category that's already set -- only fills in genuinely blank ones."""
-    changed = False
-    if "Category" not in df.columns:
-        df["Category"] = ""
-        changed = True
-
-    category_lookup: dict = {}
-    for _, row in catalog_df.iterrows():
-        material = str(row.get("Material", "")).strip()
-        category = str(row.get("Category", "")).strip()
-        key = material.lower()
-        if material and key not in category_lookup and category:
-            category_lookup[key] = category
-
-    blank = df["Category"].isna() | (df["Category"].astype(str).str.strip() == "")
-    for i in df[blank].index:
-        material_key = str(df.at[i, "Material"]).strip().lower()
-        if material_key in category_lookup:
-            df.at[i, "Category"] = category_lookup[material_key]
-            changed = True
-
-    return df, changed
-
-
 def seed_reference_lists(catalog_df: pd.DataFrame, store_module) -> None:
     """store_module is whichever backend (catalog or gsheets_storage) has
     load_stores/save_stores/load_category_list/etc -- both expose the same
@@ -131,29 +102,14 @@ def seed_reference_lists(catalog_df: pd.DataFrame, store_module) -> None:
         store_module.save_stores(stores_df)
         print(f'  Seeded Stores with "{DEFAULT_STORE}" (blank Address -- fill in via Manage stores).')
 
-    # Backfill Category on any material-list entries that predate the
-    # mapping (raw read, since store_module.load_material_list() would
-    # already normalize a missing Category column to "" and mask whether
-    # this step actually needs to do anything).
-    mat_list_raw = store_module.load_material_list()
-    migrated_mat_list, mat_list_changed = migrate_material_list_raw(mat_list_raw, catalog_df)
-    if mat_list_changed:
-        store_module.save_material_list(migrated_mat_list)
-        print("  Backfilled Category on existing Material List entries from the catalog.")
-        migrated_mat_list = store_module.load_material_list()
-    else:
-        migrated_mat_list = mat_list_raw
-
-    # Then add whatever's genuinely new (never touches/removes anything
-    # already there).
+    # Add whatever categories are genuinely new (never touches/removes
+    # anything already there). The Category<->Material mapping itself
+    # needs no seeding -- it's derived directly from the catalog.
     cat_list = store_module.load_category_list()
-    new_cat_list, new_mat_list = catalog.sync_reference_lists_from_catalog(catalog_df, cat_list, migrated_mat_list)
+    new_cat_list = catalog.sync_category_list_from_catalog(catalog_df, cat_list)
     if len(new_cat_list) != len(cat_list):
         store_module.save_category_list(new_cat_list)
         print(f"  Seeded {len(new_cat_list) - len(cat_list)} new categor{'y' if len(new_cat_list) - len(cat_list) == 1 else 'ies'}.")
-    if len(new_mat_list) != len(migrated_mat_list):
-        store_module.save_material_list(new_mat_list)
-        print(f"  Seeded {len(new_mat_list) - len(migrated_mat_list)} new material(s).")
 
 
 def migrate_local() -> None:

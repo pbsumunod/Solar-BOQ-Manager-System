@@ -99,15 +99,14 @@ def _project_dirty() -> bool:
 
 
 def _snapshot_catalog_bundle() -> None:
-    """The Materials Catalog tab now covers four pieces of session state
-    (the catalog itself, plus Stores/Categories/Material-list master data)
-    under one "Save catalog" button -- snapshot all four together so the
-    dirty flag reflects any of them changing."""
+    """The Materials Catalog tab now covers three pieces of session state
+    (the catalog itself, plus Stores/Categories master data) under one
+    "Save catalog" button -- snapshot all three together so the dirty flag
+    reflects any of them changing."""
     st.session_state.catalog_bundle_snapshot = (
         st.session_state.catalog_df.copy(),
         st.session_state.stores_df.copy(),
         st.session_state.category_list_df.copy(),
-        st.session_state.material_list_df.copy(),
     )
 
 
@@ -120,7 +119,6 @@ def _catalog_bundle_dirty() -> bool:
             st.session_state.catalog_df.equals(snapshot[0])
             and st.session_state.stores_df.equals(snapshot[1])
             and st.session_state.category_list_df.equals(snapshot[2])
-            and st.session_state.material_list_df.equals(snapshot[3])
         )
     except Exception:
         return True
@@ -158,21 +156,20 @@ def _load_with_diagnostics(label: str, fn):
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_load_catalog_bundle():
-    """The Materials Catalog (plus Stores/Categories/Material-list) is
-    genuinely shared, global data -- cache it across sessions, not just
-    within one, so N concurrent viewers loading a fresh session cost 4
-    Sheets API calls total, not 4*N. Google's Sheets API caps reads at 60
-    per minute *per underlying account*, and every viewer of this app
-    shares the same one (see workflows/manage_boq_inventory.md) -- without
-    this, a handful of people opening the app around the same time can
-    exhaust that quota and crash everyone's session. A short 60s TTL means
-    "Save catalog" elsewhere in the app is still reflected for new sessions
-    within about a minute, without needing explicit cache invalidation."""
+    """The Materials Catalog (plus Stores/Categories) is genuinely shared,
+    global data -- cache it across sessions, not just within one, so N
+    concurrent viewers loading a fresh session cost 3 Sheets API calls
+    total, not 3*N. Google's Sheets API caps reads at 60 per minute *per
+    underlying account*, and every viewer of this app shares the same one
+    (see workflows/manage_boq_inventory.md) -- without this, a handful of
+    people opening the app around the same time can exhaust that quota and
+    crash everyone's session. A short 60s TTL means "Save catalog"
+    elsewhere in the app is still reflected for new sessions within about
+    a minute, without needing explicit cache invalidation."""
     return (
         _load_with_diagnostics("the Materials Catalog", catalog_store.load_catalog),
         _load_with_diagnostics("the Stores list", catalog_store.load_stores),
         _load_with_diagnostics("the Category list", catalog_store.load_category_list),
-        _load_with_diagnostics("the Material list", catalog_store.load_material_list),
     )
 
 
@@ -203,7 +200,6 @@ def _init_state() -> None:
             st.session_state.catalog_df,
             st.session_state.stores_df,
             st.session_state.category_list_df,
-            st.session_state.material_list_df,
         ) = _cached_load_catalog_bundle()
         _snapshot_catalog_bundle()
 
@@ -363,7 +359,7 @@ with st.sidebar:
     st.download_button(
         "⬇️ Download blank BOQ template",
         data=boq_data.generate_template_workbook(
-            st.session_state.category_list_df, st.session_state.material_list_df
+            st.session_state.category_list_df, st.session_state.catalog_df
         ),
         file_name="boq_template.xlsx",
         mime=EXCEL_MIME,
@@ -536,7 +532,7 @@ with tab_boq:
                 # material actually is.
                 "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Material": st.column_config.SelectboxColumn(
-                    "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
+                    "Material", options=catalog.distinct_materials(catalog_df), required=True
                 ),
                 "Quantity": st.column_config.NumberColumn("Quantity", min_value=0.0),
                 "Store Name": st.column_config.SelectboxColumn(
@@ -560,7 +556,7 @@ with tab_boq:
                     st.form_submit_button("Apply changes", type="primary")
                 with _diagnostics("applying your Materials changes"):
                     materials_df.loc[edited.index] = edited
-                    materials_df = boq_data.apply_material_categories(materials_df, st.session_state.material_list_df)
+                    materials_df = boq_data.apply_material_categories(materials_df, catalog_df)
                     materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
                     materials_df = boq_data.recompute_material_totals(materials_df)
             else:
@@ -573,7 +569,7 @@ with tab_boq:
                     )
                     st.form_submit_button("Apply changes", type="primary")
                 with _diagnostics("applying your Materials changes"):
-                    edited = boq_data.apply_material_categories(edited, st.session_state.material_list_df)
+                    edited = boq_data.apply_material_categories(edited, catalog_df)
                     materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
                     materials_df = boq_data.recompute_material_totals(materials_df)
 
@@ -670,7 +666,6 @@ with tab_catalog:
             catalog_store.save_catalog(st.session_state.catalog_df)
             catalog_store.save_stores(st.session_state.stores_df)
             catalog_store.save_category_list(st.session_state.category_list_df)
-            catalog_store.save_material_list(st.session_state.material_list_df)
             _cached_load_catalog_bundle.clear()  # so new sessions see this save immediately, not after the TTL
             _snapshot_catalog_bundle()
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
@@ -726,38 +721,22 @@ with tab_catalog:
                 st.rerun()
 
         st.markdown("---")
-        col_cat_list, col_mat_list = st.columns(2)
-        with col_cat_list:
-            st.markdown("**Categories**")
-            edited_cat_list = st.data_editor(
-                st.session_state.category_list_df, num_rows="dynamic", hide_index=True, key="category_list_editor"
-            )
-            st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
-        with col_mat_list:
-            st.markdown("**Materials**")
-            st.caption("Category is required — it's what auto-fills Category wherever this Material is used.")
-            edited_mat_list = st.data_editor(
-                st.session_state.material_list_df,
-                num_rows="dynamic",
-                hide_index=True,
-                column_config={
-                    "Category": st.column_config.SelectboxColumn(
-                        "Category", options=st.session_state.category_list_df["Category"].tolist(), required=True
-                    ),
-                },
-                key="material_list_editor",
-            )
-            st.session_state.material_list_df = catalog.normalize_material_list_df(edited_mat_list)
+        st.markdown("**Categories**")
+        edited_cat_list = st.data_editor(
+            st.session_state.category_list_df, num_rows="dynamic", hide_index=True, key="category_list_editor"
+        )
+        st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
 
     catalog_df = st.session_state.catalog_df
     catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {
-        # Derived from Material via apply_material_categories(), same as
-        # the BOQ Materials table -- disabled here for the same reason.
-        "Category": st.column_config.TextColumn("Category", disabled=True),
-        "Material": st.column_config.SelectboxColumn(
-            "Material", options=st.session_state.material_list_df["Material"].tolist(), required=True
+        # This IS where a Material's Category gets defined -- the BOQ
+        # Materials table derives its own Category from whatever's set
+        # here (apply_material_categories, keyed off Material), so this
+        # is a required dropdown rather than a derived/disabled field.
+        "Category": st.column_config.SelectboxColumn(
+            "Category", options=st.session_state.category_list_df["Category"].tolist(), required=True
         ),
         "Store Name": st.column_config.SelectboxColumn("Store Name", options=store_names, required=True),
         "Unit Cost (₱)": st.column_config.NumberColumn(
@@ -795,8 +774,6 @@ with tab_catalog:
                 key="catalog_editor",
             )
             st.form_submit_button("Apply changes", type="primary")
-    with _diagnostics("applying your catalog changes"):
-        catalog_df = boq_data.apply_material_categories(catalog_df, st.session_state.material_list_df)
     st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going

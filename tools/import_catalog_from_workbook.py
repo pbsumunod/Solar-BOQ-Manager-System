@@ -41,15 +41,13 @@ def main() -> None:
     merged, added_count = catalog.merge_into_catalog(new_items)
     catalog.save_catalog(merged)
 
-    # So every newly imported Category/Material is immediately selectable
-    # in the strict dropdowns elsewhere in the app, not just present in
-    # the flat catalog -- existing list entries are never touched, only
-    # additions.
+    # So every newly imported Category is immediately selectable in the
+    # Category dropdown elsewhere in the app, not just present in the flat
+    # catalog -- existing list entries are never touched, only additions.
+    # Material needs no separate sync: it's derived from the catalog directly.
     category_list = catalog.load_category_list()
-    material_list = catalog.load_material_list()
-    category_list, material_list = catalog.sync_reference_lists_from_catalog(merged, category_list, material_list)
+    category_list = catalog.sync_category_list_from_catalog(merged, category_list)
     catalog.save_category_list(category_list)
-    catalog.save_material_list(material_list)
 
     print(f'Parsed {len(new_items)} material row(s) from {source_path.name} for store "{store_name}".')
     print(f"Added {added_count} new catalog entr{'y' if added_count == 1 else 'ies'}.")

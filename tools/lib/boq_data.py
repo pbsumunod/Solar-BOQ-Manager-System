@@ -227,22 +227,20 @@ def apply_store_pricing(materials_df: pd.DataFrame, catalog_df: pd.DataFrame) ->
     return df, warnings
 
 
-def apply_material_categories(df: pd.DataFrame, material_list_df: pd.DataFrame) -> pd.DataFrame:
+def apply_material_categories(df: pd.DataFrame, catalog_df: pd.DataFrame) -> pd.DataFrame:
     """Category is derived from Material via the Category<->Material
-    mapping (the "Manage stores, categories & materials" master list) --
-    same "pick X, Y follows" pattern as apply_store_pricing() for
-    Store -> Unit Cost, applied at the same point (right before
-    recompute_material_totals, on every "Apply changes"). A Material with
-    no mapping entry (e.g. not yet added to the master list, or a
-    still-blank just-added row) keeps its current Category unchanged
-    rather than getting blanked out."""
+    mapping the catalog itself already encodes (each catalog row pairs a
+    Material with its Category) -- same "pick X, Y follows" pattern as
+    apply_store_pricing() for Store -> Unit Cost, applied at the same
+    point (right before recompute_material_totals, on every "Apply
+    changes"). A Material with no catalog row (e.g. not yet added to the
+    catalog, or a still-blank just-added row) keeps its current Category
+    unchanged rather than getting blanked out."""
     df = df.copy()
-    if material_list_df is None or material_list_df.empty or "Material" not in df.columns:
+    if catalog_df is None or catalog_df.empty or "Material" not in df.columns:
         return df
 
-    category_lookup = {
-        str(row["Material"]).strip(): str(row["Category"]).strip() for _, row in material_list_df.iterrows()
-    }
+    category_lookup = catalog.material_category_map(catalog_df)
 
     for i, row in df.iterrows():
         material = str(row.get("Material", "")).strip()
@@ -314,17 +312,16 @@ def workbook_to_bytes(wb: Workbook) -> bytes:
 def _add_catalog_dropdowns(
     wb: Workbook,
     category_list_df: pd.DataFrame,
-    material_list_df: pd.DataFrame,
+    catalog_df: pd.DataFrame,
     max_row: int = 500,
 ) -> None:
     """Add Excel dropdown lists for Category and Material on the Materials
-    sheet, sourced from the editable Category/Material master lists (the
-    authoritative source now that both are strict dropdown-only fields in
-    the app itself, not derived from the flat multi-store catalog, which
-    would otherwise repeat every material once per store). Values are
-    written to a hidden helper sheet and referenced by range (not as a
-    literal list) so names with commas or quotes don't break anything, and
-    there's no 255-character formula length limit to worry about.
+    sheet. Category comes from the editable Category master list; Material
+    comes straight from the distinct Material names already in the catalog
+    (there's no separate master list for it). Values are written to a
+    hidden helper sheet and referenced by range (not as a literal list) so
+    names with commas or quotes don't break anything, and there's no
+    255-character formula length limit to worry about.
     """
 
     def _clean_values(series: pd.Series) -> list:
@@ -337,7 +334,7 @@ def _add_catalog_dropdowns(
 
     try:
         categories = _clean_values(category_list_df["Category"]) if category_list_df is not None and not category_list_df.empty else []
-        materials_list = _clean_values(material_list_df["Material"]) if material_list_df is not None and not material_list_df.empty else []
+        materials_list = catalog.distinct_materials(catalog_df)
     except Exception:
         # Dropdown suggestions are a nice-to-have -- malformed/partial
         # list data should never block downloading the template itself.
@@ -388,20 +385,20 @@ def _add_catalog_dropdowns(
 
 def generate_template_workbook(
     category_list_df: pd.DataFrame | None = None,
-    material_list_df: pd.DataFrame | None = None,
+    catalog_df: pd.DataFrame | None = None,
 ) -> bytes:
     """Build the downloadable blank BOQ template. Category/Material columns
-    get Excel dropdown suggestions from the editable Category/Material
-    master lists when available (typed values outside the list are still
-    accepted -- these are suggestions, not a hard restriction, since a new
-    project may need materials that aren't catalogued yet). Pass the
-    current in-session lists explicitly to reflect unsaved edits; defaults
-    to what's on disk otherwise.
+    get Excel dropdown suggestions from the editable Category master list
+    and the catalog's distinct Material names (typed values outside the
+    list are still accepted -- these are suggestions, not a hard
+    restriction, since a new project may need materials that aren't
+    catalogued yet). Pass the current in-session data explicitly to
+    reflect unsaved edits; defaults to what's on disk otherwise.
     """
     if category_list_df is None:
         category_list_df = catalog.load_category_list()
-    if material_list_df is None:
-        material_list_df = catalog.load_material_list()
+    if catalog_df is None:
+        catalog_df = catalog.load_catalog()
 
     materials = pd.DataFrame(
         [
@@ -437,7 +434,7 @@ def generate_template_workbook(
         "schema_version": SCHEMA_VERSION,
     }
     wb = build_workbook(materials, expenses, meta)
-    _add_catalog_dropdowns(wb, category_list_df, material_list_df)
+    _add_catalog_dropdowns(wb, category_list_df, catalog_df)
     return workbook_to_bytes(wb)
 
 

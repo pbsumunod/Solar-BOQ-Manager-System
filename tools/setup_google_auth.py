@@ -109,8 +109,8 @@ def _ensure_worksheet(sh, sheet_name: str, columns: list, load_local_df) -> int:
 
 def find_or_create_catalog_spreadsheet(client) -> str:
     """Find or create the "BOQ Materials Catalog" spreadsheet, and make sure
-    all four of its tabs (Catalog, Stores, Categories, Material List) exist
-    -- seeding any that are missing from local data. Handles both a
+    all three of its tabs (Catalog, Stores, Categories) exist -- seeding
+    any that are missing from local data. Handles both a
     brand-new spreadsheet and a spreadsheet that exists but is missing one
     or more tabs (e.g. a leftover half-created file from an earlier run
     that failed partway through, such as before the Sheets API was
@@ -136,9 +136,6 @@ def find_or_create_catalog_spreadsheet(client) -> str:
     added_categories = _ensure_worksheet(sh, gsheets_storage.CATEGORIES_SHEET, catalog.CATEGORY_LIST_COLUMNS, catalog.load_category_list)
     if added_categories:
         print(f"  Added and seeded the Categories tab ({added_categories} categor{'y' if added_categories == 1 else 'ies'}).")
-    added_materials = _ensure_worksheet(sh, gsheets_storage.MATERIAL_LIST_SHEET, catalog.MATERIAL_LIST_COLUMNS, catalog.load_material_list)
-    if added_materials:
-        print(f"  Added and seeded the Material List tab ({added_materials} material(s)).")
 
     if not existing:
         sh.del_worksheet(default_ws)

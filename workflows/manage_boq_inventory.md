@@ -179,8 +179,8 @@ complexity of literally separating them. `Brand` is the manufacturer name;
 consumable items don't have one and leave it blank — only major equipment
 like panels/inverters typically do).
 
-**Stores, Categories, Materials — three more editable master lists**, under
-the tab's "⚙️ Manage stores, categories & materials" expander:
+**Stores and Categories — two more editable master lists**, under the tab's
+"⚙️ Manage stores, categories & materials" expander:
 - **Stores** (`catalog.STORES_COLUMNS = ["Store Name", "Address"]`,
   `load_stores`/`save_stores`/`ensure_store_exists`): unique on Store Name
   (case-insensitive). Each store with a non-blank Address gets a
@@ -191,58 +191,53 @@ the tab's "⚙️ Manage stores, categories & materials" expander:
   starting point to edit from — mirrors the existing sidebar "Copy from
   existing project" pattern.
 - **Categories** (`catalog.CATEGORY_LIST_COLUMNS = ["Category"]`): a flat
-  list, edited via its own small `st.data_editor`.
-- **Materials** (`catalog.MATERIAL_LIST_COLUMNS = ["Category", "Material"]`)
-  is a **Category → Material mapping**, not a flat list — every Material
-  has exactly one Category, and its own editor requires picking a Category
-  (`st.column_config.SelectboxColumn(..., required=True)`) whenever a new
-  Material is added, sourced from the Categories list above. This is
-  deliberately one-directional: Categories don't reference Materials, only
-  Materials reference a Category, which keeps the whole thing a simple flat
-  table rather than needing `st.column_config.SelectboxColumn`'s lack of
-  cascading/dependent-dropdown support to somehow filter the Material
-  options by a previously-picked Category (not attempted, and not needed
-  for this to work).
-- **`boq_data.apply_material_categories(df, material_list_df)`** is what
-  makes the mapping actually apply: on every "Apply changes" (same
-  insertion point as `apply_store_pricing`, right before
-  `recompute_material_totals`, in the BOQ Materials table *and* the main
-  Materials Catalog editor), each row's `Category` gets overwritten from
-  its `Material`'s mapped Category. Because of this, `Category` is a
-  **disabled/derived column** in both of those tables
-  (`st.column_config.TextColumn(disabled=True)`, not a `SelectboxColumn`)
+  list, edited via its own small `st.data_editor`, and the source of the
+  required `Category` dropdown on the main catalog editor.
+
+**There is no separate Materials master list.** Earlier this existed as a
+`Category → Material` mapping edited independently of the catalog, but that
+risked drifting out of sync with the catalog's own Category/Material data —
+the catalog already *is* the authoritative Category-Material mapping, one
+pair per row. So:
+- In the **Materials Catalog** tab, `Category` is a required
+  `SelectboxColumn` (sourced from the Categories list) and `Material` is
+  free text — this is where new materials get defined, alongside the
+  Category they belong to.
+- In the **BOQ Materials** table, `Material` is a `SelectboxColumn` sourced
+  from `catalog.distinct_materials(catalog_df)` (the catalog's own distinct
+  Material names, deduped case-insensitively), and `Category` is a
+  **disabled/derived column** (`st.column_config.TextColumn(disabled=True)`)
   — the same "derived fields aren't independently editable" principle
-  `Total Cost (₱)` already uses, extended here so Category can never drift
-  out of sync with what the Material actually is. A Material with no
-  mapping entry keeps its existing Category unchanged rather than getting
-  blanked out (same non-destructive philosophy as the pricing lookup) —
-  though in practice this shouldn't happen, since `Material` is itself a
-  `SelectboxColumn` sourced only from this same mapping, so anything
-  pickable already has a Category.
-- **`catalog.sync_reference_lists_from_catalog(catalog_df, category_list_df,
-  material_list_df)`**: given a catalog (or newly parsed/imported rows),
-  adds any Category/Material pairs not already in the respective lists —
-  never removes or overwrites existing entries. Shared by
-  `tools/import_catalog_from_workbook.py` (so a freshly imported material
-  is immediately selectable, not just present in the flat catalog) and the
-  migration script's initial seeding.
-- All master lists dedupe case-insensitively (keeping the first
+  `Total Cost (₱)` already uses.
+- **`boq_data.apply_material_categories(df, catalog_df)`** is what makes
+  that derivation happen: on every "Apply changes" in the BOQ Materials
+  table (same insertion point as `apply_store_pricing`, right before
+  `recompute_material_totals`), each row's `Category` gets overwritten from
+  `catalog.material_category_map(catalog_df)` (first catalog row for that
+  Material wins). A Material with no catalog row keeps its existing
+  Category unchanged rather than getting blanked out (same non-destructive
+  philosophy as the pricing lookup).
+- **`catalog.sync_category_list_from_catalog(catalog_df, category_list_df)`**:
+  given a catalog (or newly parsed/imported rows), adds any Category not
+  already in the Category list — never removes or overwrites existing
+  entries. Shared by `tools/import_catalog_from_workbook.py` (so a freshly
+  imported category is immediately selectable) and the migration script's
+  initial seeding.
+- Stores/Categories dedupe case-insensitively (keeping the first
   occurrence's casing) via `catalog.normalize_stores_df` /
-  `catalog.normalize_simple_list_df` (Categories) /
-  `catalog.normalize_material_list_df` (Materials, dedupes on `Material`
-  only — `Category` rides along with whichever row for that Material
-  survives) — "Panels" and "panels" never both survive as separate entries.
+  `catalog.normalize_simple_list_df` — "Panels" and "panels" never both
+  survive as separate entries.
 
 **Storage layout differs by backend, deliberately**: locally, Stores/
-Categories/Materials each live in their own small file
-(`data/stores.xlsx`, `data/category_list.xlsx`, `data/material_list.xlsx`),
-*not* extra sheets inside `materials_catalog.xlsx` — `catalog.save_catalog()`'s
-`df.to_excel(path, sheet_name="Catalog")` call replaces the **entire workbook
-file**, not just that one sheet, so colocating them would mean every catalog
-save silently wipes any sheets sharing that file. On Google Sheets this risk
-doesn't exist (`gspread` only touches the one tab it's told to), so there
-they're just three more tabs (`Stores`, `Categories`, `Material List`) on the
-same catalog Spreadsheet — no new secret/ID needed.
+Categories each live in their own small file (`data/stores.xlsx`,
+`data/category_list.xlsx`), *not* extra sheets inside `materials_catalog.xlsx`
+— `catalog.save_catalog()`'s `df.to_excel(path, sheet_name="Catalog")` call
+replaces the **entire workbook file**, not just that one sheet, so
+colocating them would mean every catalog save silently wipes any sheets
+sharing that file. On Google Sheets this risk doesn't exist (`gspread` only
+touches the one tab it's told to), so there they're just two more tabs
+(`Stores`, `Categories`) on the same catalog Spreadsheet — no new secret/ID
+needed.
 
 In the 📋 BOQ tab, "➕ Add items from catalog" lets you filter by store
 (defaults to "Plug and Go" if present, to preserve the original
@@ -273,9 +268,9 @@ physical unit (e.g. `pc`/`Pc`/`pcs` → `pcs`, `Mtrs`/`mtrs` → `m`) via
 and save, so the same unit never ends up spelled multiple ways in the
 catalog. Add more aliases there if a new variant shows up.
 
-The catalog itself (plus Stores/Categories/Materials) is directly editable
-in its tab and persisted together with one "💾 Save catalog" button (uses a
-bundled dirty-state snapshot covering all four pieces of session state —
+The catalog itself (plus Stores/Categories) is directly editable in its tab
+and persisted together with one "💾 Save catalog" button (uses a bundled
+dirty-state snapshot covering all three pieces of session state —
 `_snapshot_catalog_bundle`/`_catalog_bundle_dirty` — same 🟠/✅ pattern as
 the project Save button). It was originally seeded from `PACKAGES.xlsx` (a
 6.6kWp/6kWac/314AH-battery package quote from "Plug and Go") via:
@@ -321,8 +316,8 @@ location-scoped URL in `price_links.py` (commented inline with an example).
 ## Data location and durability
 Locally (the default, no extra setup required), project files live in
 `data/projects/`, and the catalog + its master lists live at
-`data/materials_catalog.xlsx`, `data/stores.xlsx`, `data/category_list.xlsx`,
-`data/material_list.xlsx` — all **durable, not disposable**, unlike `.tmp/`:
+`data/materials_catalog.xlsx`, `data/stores.xlsx`, `data/category_list.xlsx`
+— all **durable, not disposable**, unlike `.tmp/`:
 nothing in `data/` is regenerated automatically, and it should not be
 cleaned up casually. All are gitignored (Excel binaries don't diff usefully
 in git, and this may hold client pricing), so back them up manually (e.g.
@@ -474,14 +469,17 @@ automatically based on whether Google credentials are configured, via
   `*_store.create_*` function directly (persists for real) versus only
   mutating `st.session_state` (safe, session-local) -- this project's own
   Apply-vs-Save split (see above) is precisely the distinction to check for.
-- The Category<->Material mapping was added *after* the flat Category/
-  Material lists were already shipped and the catalog already had real
-  Category-Material pairs for all 50 items -- so "map the materials by
-  category, using the current data" was purely a backfill: the catalog
-  itself was already the ground truth, `migrate_material_list_raw()` just
-  needed to read it and fill in the previously-flat Material list's new
-  Category column. No manual re-categorization was needed. Worth
-  remembering if a similar "add structure to already-populated data"
-  request comes up again -- check whether some *other* part of the
-  existing data already implies the answer before asking the user to
-  redo work by hand.
+- The Category<->Material mapping was first added as a standalone
+  `Category → Material` master list, backfilled from the catalog's
+  existing Category-Material pairs (the catalog was already the ground
+  truth for all 50 items, so no manual re-categorization was needed). But
+  maintaining it as a *separate* list turned out to be the wrong call --
+  it could drift out of sync with the catalog itself, which already
+  encodes the exact same mapping, one pair per row. Simplified shortly
+  after to derive the mapping directly from the catalog
+  (`catalog.material_category_map`/`catalog.distinct_materials`) and
+  removed the separate list entirely. Worth remembering generally: when a
+  new "master list" would just restate data another table already has,
+  prefer deriving it on read over maintaining a second copy that can go
+  stale -- and don't hesitate to walk back a recently-added structure once
+  that becomes clear, rather than layering more sync logic on top of it.

@@ -16,7 +16,6 @@ data/projects/*.xlsx
 data/materials_catalog.xlsx
 data/stores.xlsx
 data/category_list.xlsx
-data/material_list.xlsx
 
 # Source pricing workbook (business/supplier pricing) — same rationale as data/.
 PACKAGES.xlsx
