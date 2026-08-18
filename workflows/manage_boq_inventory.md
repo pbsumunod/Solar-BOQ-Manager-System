@@ -64,6 +64,26 @@ only update once "Apply changes" is clicked, not live as you type. The
 deliberately left un-batched (out of scope when this was raised, and lower
 friction anyway -- typically only 1-2 cells being edited at a time).
 
+**Apply changes vs. Save**: "Apply changes" only commits edits into this
+browser session (`st.session_state`) -- fast, local, no network call.
+"💾 Save" (sidebar, for the active project) and "💾 Save catalog" (Materials
+Catalog tab) are the only actions that actually write to storage (Google
+Sheets when deployed, local `.xlsx` otherwise), which is comparatively slow
+and, when deployed, immediately visible to every other viewer of the app.
+Deliberately kept as two separate steps rather than merged, so a user can
+apply several rounds of edits and review the result before publishing them
+to shared storage. To make the distinction legible rather than just
+"two buttons that sound similar," both Save buttons track a dirty flag: a
+snapshot of what's actually on disk/Sheets is taken right after every
+load and every successful save (`_snapshot_project()` /
+`_snapshot_catalog()`), compared against the live session state on every
+render (`_project_dirty()` / `_catalog_dirty()` via `DataFrame.equals()`),
+and the button switches label/color accordingly -- "🟠 Save*" (`type="primary"`)
+when there's anything applied but not yet persisted, "✅ Save"
+(`type="secondary"`) when the session matches storage exactly. Comparison
+failures (rare; e.g. an unexpected dtype mismatch) intentionally default to
+"dirty" rather than falsely claiming everything's saved.
+
 ## How to run
 ```
 cd "Solar System"

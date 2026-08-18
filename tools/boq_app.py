@@ -71,6 +71,45 @@ def _select_storage_backend():
     return boq_data, catalog
 
 
+def _snapshot_project() -> None:
+    """Record what's currently on disk/Sheets, so _project_dirty() can tell
+    whether there are edits sitting only in this session that Save hasn't
+    persisted yet."""
+    st.session_state.project_saved_snapshot = (
+        st.session_state.materials_df.copy(),
+        st.session_state.expenses_df.copy(),
+    )
+
+
+def _project_dirty() -> bool:
+    snapshot = st.session_state.get("project_saved_snapshot")
+    if snapshot is None:
+        return False
+    try:
+        return not (
+            st.session_state.materials_df.equals(snapshot[0])
+            and st.session_state.expenses_df.equals(snapshot[1])
+        )
+    except Exception:
+        # If comparison itself is ever unclear, err toward "unsaved" rather
+        # than falsely reassuring the user everything's persisted.
+        return True
+
+
+def _snapshot_catalog() -> None:
+    st.session_state.catalog_saved_snapshot = st.session_state.catalog_df.copy()
+
+
+def _catalog_dirty() -> bool:
+    snapshot = st.session_state.get("catalog_saved_snapshot")
+    if snapshot is None:
+        return False
+    try:
+        return not st.session_state.catalog_df.equals(snapshot)
+    except Exception:
+        return True
+
+
 def _init_state() -> None:
     if "current_project_slug" not in st.session_state:
         st.session_state.current_project_slug = None
@@ -78,8 +117,10 @@ def _init_state() -> None:
         st.session_state.materials_df = boq_data.blank_materials_df()
         st.session_state.expenses_df = boq_data.blank_expenses_df()
         st.session_state.project_meta = {}
+        _snapshot_project()
     if "catalog_df" not in st.session_state:
         st.session_state.catalog_df = catalog_store.load_catalog()
+        _snapshot_catalog()
 
 
 def _load_project(slug: str) -> None:
@@ -89,6 +130,7 @@ def _load_project(slug: str) -> None:
     st.session_state.materials_df = materials_df
     st.session_state.expenses_df = expenses_df
     st.session_state.project_meta = meta
+    _snapshot_project()
 
 
 def _text_search_mask(df: pd.DataFrame, query: str, columns: list) -> pd.Series:
@@ -134,16 +176,25 @@ with st.sidebar:
             _load_project(selected_slug)
             st.rerun()
 
+        project_dirty = _project_dirty()
         col_save, col_export = st.columns(2)
         with col_save:
-            if st.button("💾 Save", type="primary", use_container_width=True):
+            save_label = "🟠 Save*" if project_dirty else "✅ Save"
+            if st.button(
+                save_label,
+                type="primary" if project_dirty else "secondary",
+                use_container_width=True,
+                help="Unsaved changes in this session" if project_dirty else "Everything is saved",
+            ):
                 project_store.save_project(
                     st.session_state.current_project_slug,
                     st.session_state.materials_df,
                     st.session_state.expenses_df,
                     st.session_state.project_meta,
                 )
+                _snapshot_project()
                 st.toast("Project saved.", icon="💾")
+                st.rerun()
         with col_export:
             st.download_button(
                 "⬇️ Export",
@@ -173,6 +224,7 @@ with st.sidebar:
                         st.session_state.expenses_df,
                         st.session_state.project_meta,
                     )
+                    _snapshot_project()
                     st.toast("Renamed.", icon="✏️")
                     st.rerun()
     else:
@@ -394,7 +446,7 @@ with tab_boq:
                 materials_df = boq_data.recompute_material_totals(edited)
 
             st.session_state.materials_df = materials_df
-            st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" — totals and the price-check list below update after you apply.")
+            st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
 
             with st.expander("🔎 Price-check links (Shopee / Lazada / Facebook Marketplace)"):
                 visible_materials = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
@@ -462,9 +514,18 @@ with tab_catalog:
             label_visibility="collapsed",
         )
     with col_save:
-        if st.button("💾 Save catalog", type="primary", use_container_width=True):
+        catalog_dirty = _catalog_dirty()
+        save_catalog_label = "🟠 Save catalog*" if catalog_dirty else "✅ Save catalog"
+        if st.button(
+            save_catalog_label,
+            type="primary" if catalog_dirty else "secondary",
+            use_container_width=True,
+            help="Unsaved changes in this session" if catalog_dirty else "Everything is saved",
+        ):
             catalog_store.save_catalog(st.session_state.catalog_df)
+            _snapshot_catalog()
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
+            st.rerun()
 
     catalog_df = st.session_state.catalog_df
     catalog_search_cols = ["Category", "Material", "Brand", "Model"]
@@ -496,7 +557,7 @@ with tab_catalog:
                 key="catalog_editor",
             )
             st.form_submit_button("Apply changes", type="primary")
-    st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to save them into this session (still separate from \"💾 Save catalog\", which writes to storage).")
+    st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going
     # through recompute_material_totals after its own editor) so a
