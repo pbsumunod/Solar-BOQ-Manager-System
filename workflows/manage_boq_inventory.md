@@ -241,3 +241,21 @@ automatically based on whether Google credentials are configured, via
   before stringifying, instead of `.astype(str)` on the raw column, plus
   wrapping the whole thing in a try/except so malformed catalog data
   degrades to "no dropdown suggestions" rather than crashing the app).
+
+  That first fix only patched the one call site that had already crashed.
+  A second, still-blank catalog row later crashed a *different* reader
+  (`_format_catalog_choice`'s `f"{cost:,.2f}"`, where `cost` was `None`) --
+  same root cause, different symptom, because `st.session_state.catalog_df`
+  itself was never guaranteed clean, only whatever individual code happened
+  to defend against it. Patched that call site too, but the real fix was
+  upstream: `catalog_df` is now run through `catalog.normalize_catalog_df()`
+  immediately after every `st.data_editor()` call, before it's ever stored
+  back to `st.session_state` -- the same pattern `materials_df` already used
+  (`recompute_material_totals()` right after its own editor). One
+  still-blank row now becomes `""`/`0.0` at the source instead of `None`/
+  `NaN` propagating to every future reader to individually defend against.
+  Lesson: when a widget's raw output feeds `st.session_state`, normalize
+  once at that single write point rather than patching each read site as
+  it's discovered crashing -- especially for anything editable via
+  `num_rows="dynamic"`, since a freshly added, not-yet-filled-in row is a
+  completely normal, frequent state to land in `st.session_state` in.

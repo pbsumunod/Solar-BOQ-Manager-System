@@ -488,4 +488,10 @@ with tab_catalog:
             key="catalog_editor",
         )
 
-    st.session_state.catalog_df = catalog_df
+    # Normalize right after editing (same pattern as materials_df going
+    # through recompute_material_totals after its own editor) so a
+    # still-blank row the user just added -- None/NaN price, empty text --
+    # never leaks into session_state as raw, untyped data for every other
+    # reader of the catalog (template dropdowns, the "Add items from
+    # catalog" picker, etc.) to potentially trip over.
+    st.session_state.catalog_df = catalog.normalize_catalog_df(catalog_df)
