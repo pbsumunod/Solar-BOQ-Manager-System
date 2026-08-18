@@ -229,3 +229,15 @@ automatically based on whether Google credentials are configured, via
   `.astype(float)` on every numeric column in `boq_data.py`/`catalog.py`,
   plus `step=0.01` on every currency `NumberColumn` as a second line of
   defense. Keep both if adding new currency columns.
+- The sidebar's "Download blank BOQ template" button re-evaluates its
+  `data=` argument on *every* script rerun (Streamlit needs the bytes ready
+  in case the button gets clicked), not only when actually clicked. That
+  means anything it reads from `st.session_state` -- here, the live
+  Materials Catalog -- can be in a transient, partially-edited state (e.g.
+  a just-added, still-blank catalog row) far more often than you'd expect
+  from "only runs on download." Code driven by widgets like this needs to
+  tolerate mid-edit data, not just fully-saved data. This crashed
+  `_add_catalog_dropdowns()` (fixed by dropping nulls via `.dropna()`
+  before stringifying, instead of `.astype(str)` on the raw column, plus
+  wrapping the whole thing in a try/except so malformed catalog data
+  degrades to "no dropdown suggestions" rather than crashing the app).
