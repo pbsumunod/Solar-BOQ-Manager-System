@@ -124,6 +124,11 @@ def validate_and_normalize_materials(df: pd.DataFrame) -> tuple[pd.DataFrame, li
     """
     warnings: list[str] = []
     df = _normalize_headers(df.copy())
+    # A repeated column name (a stray duplicate header, or two alias
+    # variants like "Qty"/"Quantity" both resolving to the same canonical
+    # name above) would otherwise make every later df["Quantity"]-style
+    # access return a DataFrame instead of a Series -- keep the first.
+    df = df.loc[:, ~df.columns.duplicated()]
     df = df.drop(columns=[c for c in LEGACY_DROPPED_MATERIAL_COLUMNS if c in df.columns])
 
     missing_required = [c for c in REQUIRED_MATERIAL_COLUMNS if c not in df.columns]
@@ -256,11 +261,17 @@ def sort_materials_df(df: pd.DataFrame) -> pd.DataFrame:
     lowercase sort key, not a mutation of the real columns)."""
     if df is None or df.empty:
         return df
-    df = df.copy()
-    df["_cat"] = df["Category"].astype(str).str.lower()
-    df["_mat"] = df["Material"].astype(str).str.lower()
-    df = df.sort_values(["_cat", "_mat"], kind="mergesort")
-    return df.drop(columns=["_cat", "_mat"])
+    try:
+        sorted_df = df.copy()
+        sorted_df["_cat"] = sorted_df["Category"].astype(str).str.lower()
+        sorted_df["_mat"] = sorted_df["Material"].astype(str).str.lower()
+        sorted_df = sorted_df.sort_values(["_cat", "_mat"], kind="mergesort")
+        return sorted_df.drop(columns=["_cat", "_mat"])
+    except Exception:
+        # Sorting is a display nicety, not core functionality -- malformed
+        # or unexpectedly-shaped data should degrade to "unsorted" rather
+        # than crash the whole table.
+        return df
 
 
 def materials_total(df: pd.DataFrame) -> float:

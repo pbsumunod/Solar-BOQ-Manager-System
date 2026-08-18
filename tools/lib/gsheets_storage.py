@@ -115,7 +115,13 @@ def _worksheet_to_df(ws, expected_columns: list) -> pd.DataFrame:
     if len(values) < 2:
         return pd.DataFrame(columns=expected_columns)
     header, *rows = values
-    return pd.DataFrame(rows, columns=header)
+    df = pd.DataFrame(rows, columns=header)
+    # A repeated header (e.g. a stray duplicate "Category" column from a
+    # hand-edit of the live sheet) makes df["Category"] silently return a
+    # multi-column DataFrame instead of a Series everywhere downstream --
+    # keep only the first occurrence of each header so every reader gets
+    # the plain Series it expects.
+    return df.loc[:, ~df.columns.duplicated()]
 
 
 def _write_df(ws, df: pd.DataFrame) -> None:

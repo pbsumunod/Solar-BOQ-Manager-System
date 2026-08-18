@@ -559,3 +559,34 @@ automatically based on whether Google credentials are configured, via
   exception type for the apparent cause), suspect the underlying API
   itself being flaky before assuming an app-logic bug -- surfacing the
   real traceback (not guessing) is what made this diagnosable at all.
+- **A latent duplicate-column bug, surfaced by adding sorting**: right
+  after shipping default sorting (`catalog.sort_catalog_df`/
+  `boq_data.sort_materials_df`), the deployed app crashed with another
+  redacted `AttributeError`, this time at the new `sort_catalog_df` call
+  site (which wasn't yet wrapped in `_diagnostics` -- newly added code
+  paths need the same wrapping as everything else, not just the ones that
+  crashed before). Reproduced locally in under a minute once suspected:
+  if the underlying data has a *repeated* column name (e.g. a stray
+  duplicate "Category" header from a hand-edited live sheet), `df[
+  CATALOG_COLUMNS]`'s selection in `normalize_catalog_df` silently keeps
+  *both* copies, so `df["Category"]` returns a 2-column DataFrame instead
+  of a Series everywhere downstream -- and `.astype(str).str.lower()`
+  (the sort key, the first code in this app to actually use `.str` on
+  that column) throws exactly `AttributeError: 'DataFrame' object has no
+  attribute 'str'`. This bug predated the sorting feature entirely; sorting
+  just happened to be the first thing to exercise it. Fixed at the actual
+  root (`df.loc[:, ~df.columns.duplicated()]`, keep-first) in three places:
+  `gsheets_storage._worksheet_to_df` (every Sheets-backed table reads
+  through here), `catalog.normalize_catalog_df`, and `boq_data.
+  validate_and_normalize_materials` (the latter also guards against two
+  alias columns -- e.g. "Qty" and "Quantity" -- both resolving to the same
+  canonical name). Also made `sort_catalog_df`/`sort_materials_df`
+  fail-safe (try/except, degrade to unsorted on any error) since sorting
+  is a display nicety, not core functionality, and shouldn't be able to
+  crash the whole table regardless of root cause. Lesson: when adding a
+  new operation on already-loaded, already-"normalized" data, don't assume
+  "normalized" means "shaped exactly as documented" -- a normalize function
+  that only adds missing columns and reorders/selects a fixed list, without
+  ever deduplicating repeated ones, can silently pass a malformed shape
+  through for years until something (like a `.str` accessor) finally
+  doesn't tolerate it.

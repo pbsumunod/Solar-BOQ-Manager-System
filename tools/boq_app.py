@@ -398,7 +398,8 @@ with tab_boq:
             st.subheader("📦 Materials")
 
             materials_df = st.session_state.materials_df
-            catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
+            with _diagnostics("sorting the Materials Catalog"):
+                catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
             stores_df = st.session_state.stores_df
             store_names = stores_df["Store Name"].tolist()
 
@@ -535,7 +536,8 @@ with tab_boq:
                     label_visibility="collapsed",
                 )
 
-            materials_df = boq_data.sort_materials_df(st.session_state.materials_df)
+            with _diagnostics("sorting the Materials table"):
+                materials_df = boq_data.sort_materials_df(st.session_state.materials_df)
 
             with col_columns:
                 with st.popover("⚙️ Columns", use_container_width=True):
@@ -808,7 +810,8 @@ with tab_catalog:
         )
         st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
 
-    catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
+    with _diagnostics("sorting the Materials Catalog"):
+        catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
     catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {

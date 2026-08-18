@@ -87,6 +87,12 @@ def blank_catalog_df() -> pd.DataFrame:
 
 def normalize_catalog_df(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
+    # A repeated column name (stray duplicate header from a hand-edited
+    # sheet, or a duplicate-column upload) would otherwise survive the
+    # df[CATALOG_COLUMNS] selection below and make every later
+    # df["Category"]-style access return a DataFrame instead of a Series --
+    # keep only the first occurrence of each name.
+    df = df.loc[:, ~df.columns.duplicated()]
     for col in CATALOG_COLUMNS:
         if col not in df.columns:
             df[col] = "" if col != "Unit Cost (₱)" else 0.0
@@ -363,12 +369,19 @@ def sort_catalog_df(df: pd.DataFrame) -> pd.DataFrame:
     catalog" picker), so browsing and picking always agree on order."""
     if df is None or df.empty:
         return df
-    df = df.copy()
-    df["_cat"] = df["Category"].astype(str).str.lower()
-    df["_mat"] = df["Material"].astype(str).str.lower()
-    df["_cost"] = pd.to_numeric(df["Unit Cost (₱)"], errors="coerce")
-    df = df.sort_values(["_cat", "_mat", "_cost"], kind="mergesort")
-    return df.drop(columns=["_cat", "_mat", "_cost"])
+    try:
+        sorted_df = df.copy()
+        sorted_df["_cat"] = sorted_df["Category"].astype(str).str.lower()
+        sorted_df["_mat"] = sorted_df["Material"].astype(str).str.lower()
+        sorted_df["_cost"] = pd.to_numeric(sorted_df["Unit Cost (₱)"], errors="coerce")
+        sorted_df = sorted_df.sort_values(["_cat", "_mat", "_cost"], kind="mergesort")
+        return sorted_df.drop(columns=["_cat", "_mat", "_cost"])
+    except Exception:
+        # Sorting is a display nicety, not core functionality -- malformed
+        # or unexpectedly-shaped data (e.g. duplicate column names from a
+        # hand-edited sheet) should degrade to "unsorted" rather than
+        # crash the whole table.
+        return df
 
 
 def cheapest_catalog_rows(catalog_df: pd.DataFrame) -> pd.DataFrame:
