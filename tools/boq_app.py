@@ -124,6 +124,25 @@ def _catalog_bundle_dirty() -> bool:
         return True
 
 
+def _load_with_diagnostics(label: str, fn):
+    """Streamlit Cloud redacts the real exception message/traceback from
+    any *uncaught* error before showing it to the user ("This app has
+    encountered an error... redacted to prevent data leaks"), which makes
+    genuinely diagnosing a production-only failure (one that doesn't
+    reproduce locally) close to impossible from the outside. Catching it
+    ourselves and displaying it via st.error() bypasses that redaction --
+    st.error() is our own explicit output, not an uncaught crash, so it
+    isn't touched by it -- then st.stop() halts cleanly instead of
+    crashing further up into Streamlit's generic error screen."""
+    try:
+        return fn()
+    except Exception:
+        import traceback
+        st.error(f"Failed to load {label}. Full details below -- please copy/paste this if reporting it:")
+        st.code(traceback.format_exc())
+        st.stop()
+
+
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_load_catalog_bundle():
     """The Materials Catalog (plus Stores/Categories/Material-list) is
@@ -137,10 +156,10 @@ def _cached_load_catalog_bundle():
     "Save catalog" elsewhere in the app is still reflected for new sessions
     within about a minute, without needing explicit cache invalidation."""
     return (
-        catalog_store.load_catalog(),
-        catalog_store.load_stores(),
-        catalog_store.load_category_list(),
-        catalog_store.load_material_list(),
+        _load_with_diagnostics("the Materials Catalog", catalog_store.load_catalog),
+        _load_with_diagnostics("the Stores list", catalog_store.load_stores),
+        _load_with_diagnostics("the Category list", catalog_store.load_category_list),
+        _load_with_diagnostics("the Material list", catalog_store.load_material_list),
     )
 
 
@@ -155,7 +174,7 @@ def _cached_list_projects():
     editing) don't each cost a fresh round of API calls. Cleared explicitly
     right after create_project() so a just-created project appears
     immediately rather than waiting out the TTL."""
-    return project_store.list_projects()
+    return _load_with_diagnostics("the project list", project_store.list_projects)
 
 
 def _init_state() -> None:
