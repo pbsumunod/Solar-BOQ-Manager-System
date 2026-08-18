@@ -245,8 +245,21 @@ def _add_catalog_dropdowns(wb: Workbook, catalog_df: pd.DataFrame, max_row: int 
     if catalog_df is None or catalog_df.empty:
         return
 
-    categories = sorted({c for c in catalog_df["Category"].astype(str).str.strip() if c})
-    materials_list = sorted({m for m in catalog_df["Material"].astype(str).str.strip() if m})
+    def _clean_values(series: pd.Series) -> list:
+        # Drop actual nulls (NaN/None/pd.NA) *before* stringifying, not
+        # after -- catalog_df can transiently hold a still-blank row right
+        # after the user clicks "+" to add one but hasn't filled it in yet,
+        # and depending on dtype that blank cell isn't always a plain string
+        # "nan" once stringified. dropna() reliably catches all of those.
+        return sorted({str(v).strip() for v in series.dropna().tolist() if str(v).strip()})
+
+    try:
+        categories = _clean_values(catalog_df["Category"])
+        materials_list = _clean_values(catalog_df["Material"])
+    except Exception:
+        # Dropdown suggestions are a nice-to-have -- malformed/partial
+        # catalog data should never block downloading the template itself.
+        return
     if not categories and not materials_list:
         return
 
