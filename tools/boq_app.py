@@ -124,6 +124,40 @@ def _catalog_bundle_dirty() -> bool:
         return True
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_load_catalog_bundle():
+    """The Materials Catalog (plus Stores/Categories/Material-list) is
+    genuinely shared, global data -- cache it across sessions, not just
+    within one, so N concurrent viewers loading a fresh session cost 4
+    Sheets API calls total, not 4*N. Google's Sheets API caps reads at 60
+    per minute *per underlying account*, and every viewer of this app
+    shares the same one (see workflows/manage_boq_inventory.md) -- without
+    this, a handful of people opening the app around the same time can
+    exhaust that quota and crash everyone's session. A short 60s TTL means
+    "Save catalog" elsewhere in the app is still reflected for new sessions
+    within about a minute, without needing explicit cache invalidation."""
+    return (
+        catalog_store.load_catalog(),
+        catalog_store.load_stores(),
+        catalog_store.load_category_list(),
+        catalog_store.load_material_list(),
+    )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_list_projects():
+    """list_projects() runs unconditionally at the top of the sidebar on
+    *every* rerun (not just once per session, unlike the catalog bundle
+    above) so newly created projects show up without a full page reload.
+    For the Sheets backend that's a Drive folder listing plus one Sheets
+    read per project just to populate the sidebar dropdown -- caching it
+    means rapid-fire reruns (e.g. clicking "Apply changes" repeatedly while
+    editing) don't each cost a fresh round of API calls. Cleared explicitly
+    right after create_project() so a just-created project appears
+    immediately rather than waiting out the TTL."""
+    return project_store.list_projects()
+
+
 def _init_state() -> None:
     if "current_project_slug" not in st.session_state:
         st.session_state.current_project_slug = None
@@ -133,10 +167,12 @@ def _init_state() -> None:
         st.session_state.project_meta = {}
         _snapshot_project()
     if "catalog_df" not in st.session_state:
-        st.session_state.catalog_df = catalog_store.load_catalog()
-        st.session_state.stores_df = catalog_store.load_stores()
-        st.session_state.category_list_df = catalog_store.load_category_list()
-        st.session_state.material_list_df = catalog_store.load_material_list()
+        (
+            st.session_state.catalog_df,
+            st.session_state.stores_df,
+            st.session_state.category_list_df,
+            st.session_state.material_list_df,
+        ) = _cached_load_catalog_bundle()
         _snapshot_catalog_bundle()
 
 
@@ -173,7 +209,7 @@ _init_state()
 with st.sidebar:
     st.header("☀️ BOQ Manager")
 
-    projects = project_store.list_projects()
+    projects = _cached_list_projects()
     project_options = {p["slug"]: p["name"] for p in projects}
 
     st.subheader("📁 Active project")
@@ -241,6 +277,7 @@ with st.sidebar:
                         st.session_state.expenses_df,
                         st.session_state.project_meta,
                     )
+                    _cached_list_projects.clear()
                     _snapshot_project()
                     st.toast("Renamed.", icon="✏️")
                     st.rerun()
@@ -283,6 +320,7 @@ with st.sidebar:
                     elif source == "Copy from existing project" and copy_source_slug:
                         materials_df, expenses_df, _ = project_store.load_project(copy_source_slug)
                     slug = project_store.create_project(new_name, materials_df, expenses_df)
+                    _cached_list_projects.clear()
                     _load_project(slug)
                     st.toast(f'Created project "{new_name}".', icon="✅")
                     st.rerun()
@@ -593,6 +631,7 @@ with tab_catalog:
             catalog_store.save_stores(st.session_state.stores_df)
             catalog_store.save_category_list(st.session_state.category_list_df)
             catalog_store.save_material_list(st.session_state.material_list_df)
+            _cached_load_catalog_bundle.clear()  # so new sessions see this save immediately, not after the TTL
             _snapshot_catalog_bundle()
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
             st.rerun()

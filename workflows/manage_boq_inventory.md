@@ -411,3 +411,37 @@ automatically based on whether Google credentials are configured, via
   pre-migration data's old-named column as entirely missing and silently
   default every price to 0.0. Migrate data first, deploy code second, for
   any future rename of a column real data already exists under.
+- **Google Sheets API rate limit crashed the deployed app right after the
+  multi-store rollout** (`AttributeError` inside `_init_state()` calling
+  `gsheets_storage.load_stores()`) -- most likely a 429 (the API caps reads
+  at 60/minute *per underlying account*, and this app has exactly one
+  shared account backing *every* viewer, per the OAuth-not-service-account
+  design in `workflows/deploy_boq_app.md`) surfacing as an unhandled
+  `AttributeError` somewhere in gspread's response parsing rather than a
+  clean `APIError`, worsened by heavy migration/verification API traffic
+  run moments before. `_init_state()` was doing 4 separate Sheets reads
+  (catalog, stores, categories, material list) on every fresh session, and
+  `list_projects()` -- a Drive listing plus one read per project -- was
+  running *unconditionally on every single rerun*, not just once per
+  session, multiplying the problem further. Fixed by wrapping both in
+  `st.cache_data(ttl=60)`: `_cached_load_catalog_bundle()` and
+  `_cached_list_projects()`. Since `st.cache_data`'s cache is shared across
+  *all* sessions (unlike `st.session_state`, which is per-session), this is
+  exactly the right tool here -- the catalog/project list genuinely are
+  global, shared data, so N concurrent viewers now cost a handful of API
+  calls total instead of 4-per-session and 1-per-rerun-per-project. Cleared
+  explicitly (`.clear()`) right after any action that changes what these
+  return (save catalog, create project, rename project) so that session
+  still sees its own change immediately rather than waiting out the TTL --
+  only *other, new* sessions see up to ~60s of staleness, which is an
+  acceptable tradeoff for a small-team internal tool.
+- Some buttons persist to real storage **immediately**, not just into
+  session state -- "Rename" in particular (a deliberate design choice, see
+  the "Renaming a project" section above). Driving one of those via
+  `AppTest.button(...).click()` during testing actually renamed the real
+  local project file to the test's throwaway value; caught it by re-reading
+  the file afterward and reverted by hand. Lesson: before clicking a button
+  in an automated test, check whether its handler calls a `*_store.save_*`/
+  `*_store.create_*` function directly (persists for real) versus only
+  mutating `st.session_state` (safe, session-local) -- this project's own
+  Apply-vs-Save split (see above) is precisely the distinction to check for.
