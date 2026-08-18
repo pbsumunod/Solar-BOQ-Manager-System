@@ -19,6 +19,14 @@ st.set_page_config(page_title="BOQ Manager", layout="wide", page_icon="☀️")
 
 EXCEL_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# Streamlit's data_editor can't have both native column-header sorting and
+# in-grid row add/delete at once (num_rows="dynamic" explicitly disables
+# sorting) -- both Materials tables need sorting, so row deletion moves to
+# this transient checkbox column instead (check a row, "Apply changes"
+# removes it). Never persisted -- stripped back out right after the editor
+# returns, before anything touches st.session_state or storage.
+REMOVE_COL = "🗑️ Remove?"
+
 
 def _safe_secret(*keys):
     """Dig into st.secrets, returning None instead of raising if secrets
@@ -390,7 +398,7 @@ with tab_boq:
             st.subheader("📦 Materials")
 
             materials_df = st.session_state.materials_df
-            catalog_df = st.session_state.catalog_df
+            catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
             stores_df = st.session_state.stores_df
             store_names = stores_df["Store Name"].tolist()
 
@@ -423,6 +431,30 @@ with tab_boq:
                         unit = row["Unit of Measurement"] or "unit"
                         store = row["Store Name"] or "—"
                         return f"[{store}] {row['Category']} — {row['Material']}{brand_model} · ₱{row['Unit Cost (₱)']:,.2f}/{unit}"
+
+                    def _catalog_rows_to_material_rows(picked_df: pd.DataFrame, quantities) -> pd.DataFrame:
+                        """quantities is either a Series aligned to picked_df's
+                        index (per-row quantity, from the multi-select preview
+                        editor) or a single float applied to every row (the
+                        add-all-at-lowest-price flow)."""
+                        new_rows = []
+                        for idx, picked in picked_df.iterrows():
+                            qty = quantities.loc[idx] if hasattr(quantities, "loc") else quantities
+                            new_row = {col: "" for col in materials_df.columns}
+                            new_row.update(
+                                {
+                                    "Category": picked["Category"],
+                                    "Material": picked["Material"],
+                                    "Brand": picked["Brand"],
+                                    "Quantity": qty,
+                                    "Unit of Measurement": picked["Unit of Measurement"],
+                                    "Store Name": picked["Store Name"],
+                                    "Unit Cost (₱)": picked["Unit Cost (₱)"],
+                                    "Notes": f"Model: {picked['Model']}" if picked["Model"] else "",
+                                }
+                            )
+                            new_rows.append(new_row)
+                        return pd.DataFrame(new_rows)
 
                     col_select_all, col_clear_all = st.columns(2)
                     with col_select_all:
@@ -463,28 +495,35 @@ with tab_boq:
                         )
 
                         if st.button(f"Add {len(picked_indices)} item(s) to BOQ", type="primary"):
-                            new_rows = []
-                            for idx, preview_row in edited_preview.iterrows():
-                                picked = catalog_df.loc[idx]
-                                new_row = {col: "" for col in materials_df.columns}
-                                new_row.update(
-                                    {
-                                        "Category": picked["Category"],
-                                        "Material": picked["Material"],
-                                        "Brand": picked["Brand"],
-                                        "Quantity": preview_row["Quantity"],
-                                        "Unit of Measurement": picked["Unit of Measurement"],
-                                        "Store Name": picked["Store Name"],
-                                        "Unit Cost (₱)": picked["Unit Cost (₱)"],
-                                        "Notes": f"Model: {picked['Model']}" if picked["Model"] else "",
-                                    }
-                                )
-                                new_rows.append(new_row)
-                            new_rows_df = pd.DataFrame(new_rows)
+                            new_rows_df = _catalog_rows_to_material_rows(
+                                catalog_df.loc[picked_indices], edited_preview["Quantity"]
+                            )
                             materials_df = new_rows_df if materials_df.empty else pd.concat(
                                 [materials_df, new_rows_df], ignore_index=True
                             )
                             st.session_state.materials_df = boq_data.recompute_material_totals(materials_df)
+                            st.rerun()
+
+                    st.markdown("---")
+                    st.caption(
+                        "Or add every distinct material in the catalog at once, each priced at "
+                        "whichever store is cheapest. Materials already in this BOQ are skipped."
+                    )
+                    if st.button("➕ Add all materials (lowest price)"):
+                        cheapest_df = catalog.cheapest_catalog_rows(catalog_df)
+                        already_in_boq = {str(m).strip().lower() for m in materials_df["Material"]}
+                        cheapest_df = cheapest_df[
+                            ~cheapest_df["Material"].astype(str).str.strip().str.lower().isin(already_in_boq)
+                        ]
+                        if cheapest_df.empty:
+                            st.info("Nothing to add — every catalog material is already in this BOQ.")
+                        else:
+                            new_rows_df = _catalog_rows_to_material_rows(cheapest_df, 1.0)
+                            materials_df = new_rows_df if materials_df.empty else pd.concat(
+                                [materials_df, new_rows_df], ignore_index=True
+                            )
+                            st.session_state.materials_df = boq_data.recompute_material_totals(materials_df)
+                            st.toast(f"Added {len(new_rows_df)} material(s) at their lowest price.", icon="✅")
                             st.rerun()
 
             col_search, col_columns = st.columns([3, 1])
@@ -496,7 +535,7 @@ with tab_boq:
                     label_visibility="collapsed",
                 )
 
-            materials_df = st.session_state.materials_df
+            materials_df = boq_data.sort_materials_df(st.session_state.materials_df)
 
             with col_columns:
                 with st.popover("⚙️ Columns", use_container_width=True):
@@ -524,6 +563,7 @@ with tab_boq:
                         st.caption("No custom columns yet.")
 
             column_config = {
+                REMOVE_COL: st.column_config.CheckboxColumn(REMOVE_COL, default=False, width="small"),
                 # Category is derived from Material (apply_material_categories,
                 # below) via the Category<->Material mapping, the same
                 # "pick X, Y follows" pattern as Store -> Unit Cost -- so it's
@@ -544,40 +584,40 @@ with tab_boq:
 
             materials_search_cols = ["Material", "Brand"]
             if search_query.strip():
-                filtered = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
-                st.caption(f"Showing {len(filtered)} of {len(materials_df)} items. Clear search to add or delete rows.")
-                with st.form("materials_form_filtered", border=False):
-                    edited = st.data_editor(
-                        filtered,
-                        num_rows="fixed",
-                        column_config=column_config,
-                        key="materials_editor_filtered",
-                    )
-                    st.form_submit_button("Apply changes", type="primary")
-                with _diagnostics("applying your Materials changes"):
-                    materials_df.loc[edited.index] = edited
-                    materials_df = boq_data.apply_material_categories(materials_df, catalog_df)
-                    materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
-                    materials_df = boq_data.recompute_material_totals(materials_df)
+                visible_materials_df = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
+                st.caption(f"Showing {len(visible_materials_df)} of {len(materials_df)} items.")
             else:
-                with st.form("materials_form", border=False):
-                    edited = st.data_editor(
-                        materials_df,
-                        num_rows="dynamic",
-                        column_config=column_config,
-                        key="materials_editor",
-                    )
-                    st.form_submit_button("Apply changes", type="primary")
-                with _diagnostics("applying your Materials changes"):
-                    edited = boq_data.apply_material_categories(edited, catalog_df)
-                    materials_df, pricing_warnings = boq_data.apply_store_pricing(edited, catalog_df)
-                    materials_df = boq_data.recompute_material_totals(materials_df)
+                visible_materials_df = materials_df
+
+            display_df = visible_materials_df.copy()
+            display_df.insert(0, REMOVE_COL, False)
+
+            # num_rows="fixed" (not "dynamic") so column-header click-to-sort
+            # works -- Streamlit disables sorting entirely in dynamic mode.
+            # Adding rows happens via "Add items from catalog" above;
+            # removing happens via the checkbox column, applied below.
+            with st.form("materials_form", border=False):
+                edited = st.data_editor(
+                    display_df,
+                    num_rows="fixed",
+                    column_config=column_config,
+                    key="materials_editor",
+                )
+                st.form_submit_button("Apply changes", type="primary")
+            with _diagnostics("applying your Materials changes"):
+                to_remove = edited.index[edited[REMOVE_COL]]
+                edited = edited.drop(columns=[REMOVE_COL])
+                materials_df.loc[edited.index] = edited
+                materials_df = materials_df.drop(index=to_remove)
+                materials_df = boq_data.apply_material_categories(materials_df, catalog_df)
+                materials_df, pricing_warnings = boq_data.apply_store_pricing(materials_df, catalog_df)
+                materials_df = boq_data.recompute_material_totals(materials_df)
 
             for w in pricing_warnings:
                 st.warning(w)
 
             st.session_state.materials_df = materials_df
-            st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
+            st.caption("Edit cells above (click a column header to sort), check 🗑️ Remove? on any row you want gone, then click \"Apply changes\" — totals and the price-check list below update after you apply. The sidebar's \"Save\" button turns 🟠 whenever there's anything applied but not yet written to storage.")
 
             with st.expander("🔎 Price-check links (Shopee / Lazada / Facebook Marketplace)"):
                 visible_materials = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
@@ -671,6 +711,47 @@ with tab_catalog:
             st.toast(f"Catalog saved ({len(st.session_state.catalog_df)} items).", icon="💾")
             st.rerun()
 
+    with st.expander("➕ Add a new material"):
+        category_options = st.session_state.category_list_df["Category"].tolist()
+        if not category_options:
+            st.caption("Add a category first, in \"⚙️ Manage stores & categories\" below.")
+        elif not store_names:
+            st.caption("Add a store first, in \"⚙️ Manage stores & categories\" below.")
+        else:
+            col_a, col_b = st.columns(2)
+            with col_a:
+                new_mat_category = st.selectbox("Category", options=category_options, key="new_mat_category")
+                new_mat_material = st.text_input("Material", key="new_mat_material")
+                new_mat_brand = st.text_input("Brand", key="new_mat_brand")
+                new_mat_model = st.text_input("Model (optional)", key="new_mat_model")
+            with col_b:
+                new_mat_uom = st.text_input("Unit of Measurement", key="new_mat_uom", placeholder="e.g. pcs, m, box")
+                new_mat_store = st.selectbox("Store", options=store_names, key="new_mat_store")
+                new_mat_cost = st.number_input(
+                    "Unit Cost (₱)", min_value=0.0, step=0.01, format="%.2f", key="new_mat_cost"
+                )
+            if st.button("Add material", type="primary"):
+                if not new_mat_material.strip():
+                    st.error("Enter a material name.")
+                elif not new_mat_uom.strip():
+                    st.error("Enter a unit of measurement.")
+                else:
+                    new_row = {
+                        "Category": new_mat_category,
+                        "Material": new_mat_material.strip(),
+                        "Brand": new_mat_brand.strip(),
+                        "Model": new_mat_model.strip(),
+                        "Unit of Measurement": new_mat_uom.strip(),
+                        "Store Name": new_mat_store,
+                        "Unit Cost (₱)": new_mat_cost,
+                    }
+                    updated_catalog = pd.concat(
+                        [st.session_state.catalog_df, pd.DataFrame([new_row])], ignore_index=True
+                    )
+                    st.session_state.catalog_df = catalog.normalize_catalog_df(updated_catalog)
+                    st.toast(f'Added "{new_mat_material.strip()}".', icon="✅")
+                    st.rerun()
+
     with st.expander("⚙️ Manage stores & categories"):
         st.markdown("**Stores**")
         edited_stores = st.data_editor(
@@ -727,10 +808,11 @@ with tab_catalog:
         )
         st.session_state.category_list_df = catalog.normalize_simple_list_df(edited_cat_list, "Category")
 
-    catalog_df = st.session_state.catalog_df
+    catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
     catalog_search_cols = ["Category", "Material", "Brand", "Model", "Store Name"]
 
     catalog_column_config = {
+        REMOVE_COL: st.column_config.CheckboxColumn(REMOVE_COL, default=False, width="small"),
         # This IS where a Material's Category gets defined -- the BOQ
         # Materials table derives its own Category from whatever's set
         # here (apply_material_categories, keyed off Material), so this
@@ -751,30 +833,30 @@ with tab_catalog:
         else (catalog_df["Store Name"] == catalog_store_filter)
     )
     is_filtered = bool(catalog_search.strip()) or catalog_store_filter != "All stores"
-
+    visible_catalog_df = catalog_df[text_mask & store_mask] if is_filtered else catalog_df
     if is_filtered:
-        visible_catalog = catalog_df[text_mask & store_mask]
-        st.caption(f"Showing {len(visible_catalog)} of {len(catalog_df)} items. Clear filters to add or delete rows.")
-        with st.form("catalog_form_filtered", border=False):
-            edited_catalog = st.data_editor(
-                visible_catalog,
-                num_rows="fixed",
-                column_config=catalog_column_config,
-                key="catalog_editor_filtered",
-            )
-            st.form_submit_button("Apply changes", type="primary")
-        with _diagnostics("applying your catalog changes"):
-            catalog_df.loc[edited_catalog.index] = edited_catalog
-    else:
-        with st.form("catalog_form", border=False):
-            catalog_df = st.data_editor(
-                catalog_df,
-                num_rows="dynamic",
-                column_config=catalog_column_config,
-                key="catalog_editor",
-            )
-            st.form_submit_button("Apply changes", type="primary")
-    st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
+        st.caption(f"Showing {len(visible_catalog_df)} of {len(catalog_df)} items.")
+
+    display_catalog_df = visible_catalog_df.copy()
+    display_catalog_df.insert(0, REMOVE_COL, False)
+
+    # num_rows="fixed" (not "dynamic") so column-header click-to-sort works.
+    # Adding a material happens via "➕ Add a new material" above; removing
+    # happens via the checkbox column, applied below.
+    with st.form("catalog_form", border=False):
+        edited_catalog = st.data_editor(
+            display_catalog_df,
+            num_rows="fixed",
+            column_config=catalog_column_config,
+            key="catalog_editor",
+        )
+        st.form_submit_button("Apply changes", type="primary")
+    with _diagnostics("applying your catalog changes"):
+        to_remove = edited_catalog.index[edited_catalog[REMOVE_COL]]
+        edited_catalog = edited_catalog.drop(columns=[REMOVE_COL])
+        catalog_df.loc[edited_catalog.index] = edited_catalog
+        catalog_df = catalog_df.drop(index=to_remove)
+    st.caption("Edit cells above (click a column header to sort), check 🗑️ Remove? on any row you want gone, then click \"Apply changes\" to update this session. \"Save catalog\" (top right) turns 🟠 whenever there's anything applied but not yet written to storage.")
 
     # Normalize right after editing (same pattern as materials_df going
     # through recompute_material_totals after its own editor) so a

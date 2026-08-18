@@ -84,6 +84,56 @@ when there's anything applied but not yet persisted, "✅ Save"
 failures (rare; e.g. an unexpected dtype mismatch) intentionally default to
 "dirty" rather than falsely claiming everything's saved.
 
+**Sorting vs. in-grid row add/delete**: Streamlit's `st.data_editor` can't
+have both native column-header click-to-sort *and* `num_rows="dynamic"`
+(the mode that lets you type into a blank trailing row to add one, or
+click a row's trash icon to delete it) -- `num_rows="dynamic"` explicitly
+disables sorting. Since both Materials tables (BOQ Materials, Materials
+Catalog) need to be sortable, both now always run `num_rows="fixed"`, and
+row add/delete moved elsewhere:
+- **Adding**: BOQ Materials rows come from "➕ Add items from catalog"
+  (pick-and-set-quantity) or "➕ Add all materials (lowest price)" (see
+  below) -- there's no "type a new row" option, but there never was a
+  useful one anyway, since `Material` there has always been a closed
+  dropdown sourced from the catalog. Materials Catalog rows come from the
+  "➕ Add a new material" expander (a small form: Category/Material/Brand/
+  Model/UoM/Store/Unit Cost, "Add material" button) above the table.
+- **Deleting**: both tables have a transient `🗑️ Remove?` checkbox column
+  (`REMOVE_COL` in `boq_app.py`) prepended to the display copy right before
+  rendering, never part of the real schema -- check a row, click "Apply
+  changes", and it's dropped from the underlying DataFrame along with
+  whatever other edits were made in the same submission. Stripped back out
+  immediately after the editor returns, before anything touches
+  `st.session_state` or storage, so it can never leak into a saved file.
+
+**Default sort order**: both tables load pre-sorted --
+`boq_data.sort_materials_df()` (Category, then Material, ascending) for
+BOQ Materials, `catalog.sort_catalog_df()` (Category, then Material, then
+Unit Cost, ascending) for the Materials Catalog and everywhere the catalog
+feeds a picker (e.g. "Add items from catalog"'s multiselect, so browsing
+and picking always agree on order). Both sort case-insensitively via a
+throwaway lowercase key column, never mutating the real Category/Material
+text. This is a *display* default, re-applied on every load -- a user's
+in-browser column-header sort (click to reorder) is a client-side view on
+top of it and doesn't change what gets saved; the next reload reverts to
+the Category/Material(/Unit Cost) default.
+
+**"Add all materials (lowest price)"** (`catalog.cheapest_catalog_rows()`):
+a one-click bulk-add in the BOQ Materials tab's "➕ Add items from catalog"
+expander. Adds one row per distinct Material across the *entire* catalog,
+each priced at whichever store carries it cheapest (ties keep whichever
+row appears first) -- not just the currently store-filtered subset the
+multiselect above it is scoped to. Materials whose name already appears
+anywhere in the current BOQ (case-insensitive) are skipped, so clicking it
+a second time is a no-op ("Nothing to add...") rather than creating
+duplicate rows.
+
+**CSV export**: no dedicated button -- both tables' built-in toolbar
+download icon (hover over the table, top-right) already exports exactly
+what's currently rendered (all columns, and whatever rows the search/store
+filter currently shows) as CSV. This is a Streamlit frontend feature, not
+something configured from `boq_app.py`.
+
 ## How to run
 ```
 cd "Solar System"

@@ -250,6 +250,19 @@ def apply_material_categories(df: pd.DataFrame, catalog_df: pd.DataFrame) -> pd.
     return df
 
 
+def sort_materials_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Default browse order for the BOQ Materials table: Category, then
+    Material, both ascending and case-insensitive (via a throwaway
+    lowercase sort key, not a mutation of the real columns)."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    df["_cat"] = df["Category"].astype(str).str.lower()
+    df["_mat"] = df["Material"].astype(str).str.lower()
+    df = df.sort_values(["_cat", "_mat"], kind="mergesort")
+    return df.drop(columns=["_cat", "_mat"])
+
+
 def materials_total(df: pd.DataFrame) -> float:
     if df.empty or "Total Cost (₱)" not in df.columns:
         return 0.0

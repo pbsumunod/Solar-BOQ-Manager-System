@@ -352,3 +352,39 @@ def material_category_map(catalog_df: pd.DataFrame) -> dict:
         if material and material not in mapping and category:
             mapping[material] = category
     return mapping
+
+
+def sort_catalog_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Default browse order for the catalog: Category, then Material, then
+    Unit Cost, all ascending. Text keys sort case-insensitively (so
+    "panels" and "Panels" land together) via a throwaway lowercase sort
+    key rather than mutating the real columns. Used both for the Materials
+    Catalog table itself and anything built from it (the "Add items from
+    catalog" picker), so browsing and picking always agree on order."""
+    if df is None or df.empty:
+        return df
+    df = df.copy()
+    df["_cat"] = df["Category"].astype(str).str.lower()
+    df["_mat"] = df["Material"].astype(str).str.lower()
+    df["_cost"] = pd.to_numeric(df["Unit Cost (₱)"], errors="coerce")
+    df = df.sort_values(["_cat", "_mat", "_cost"], kind="mergesort")
+    return df.drop(columns=["_cat", "_mat", "_cost"])
+
+
+def cheapest_catalog_rows(catalog_df: pd.DataFrame) -> pd.DataFrame:
+    """One catalog row per distinct Material (case-insensitive) -- whichever
+    store has the lowest Unit Cost for that Material. Ties keep whichever
+    row appears first. Powers the "Add all materials (lowest price)" bulk
+    -add action, so adding the whole catalog to a BOQ in one click never
+    adds the same Material twice at an inflated price just because a
+    pricier store's row happened to be picked."""
+    if catalog_df is None or catalog_df.empty:
+        return catalog_df
+    df = catalog_df.copy()
+    df["_key"] = df["Material"].astype(str).str.strip().str.lower()
+    df = df[df["_key"] != ""]
+    if df.empty:
+        return df.drop(columns=["_key"])
+    df["_cost"] = pd.to_numeric(df["Unit Cost (₱)"], errors="coerce")
+    cheapest_idx = df.groupby("_key")["_cost"].idxmin()
+    return df.loc[cheapest_idx].drop(columns=["_key", "_cost"])
