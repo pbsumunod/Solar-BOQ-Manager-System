@@ -370,47 +370,34 @@ def _add_materials_dialog() -> None:
             st.rerun()
 
 
-@st.dialog("🗑️ Remove materials", width="small")
+@st.dialog("🗑️ Remove materials", width="large")
 def _remove_materials_dialog() -> None:
     materials_df = boq_data.sort_materials_df(st.session_state.materials_df)
     if materials_df.empty:
         st.caption("No materials to remove.")
         return
 
-    def _format_material_removal_choice(idx: int) -> str:
-        row = materials_df.loc[idx]
-        return f"{row['Category']} — {row['Material']} ({row['Store Name']}) · Qty {row['Quantity']}"
-
-    # A widget's session_state[key] can only be reassigned *before* that
-    # widget is instantiated in a given run -- doing it after (e.g. right
-    # after the "Remove" button, which appears below the multiselect in the
-    # layout) raises StreamlitAPIException. So resetting the selection
-    # after a removal is deferred to a flag, consumed here, on the next
-    # run -- before the multiselect below gets created.
-    if st.session_state.pop("_reset_materials_remove_pick", False):
-        st.session_state["materials_remove_pick"] = []
-
-    col_rm_select_all, col_rm_clear_all = st.columns(2)
-    with col_rm_select_all:
-        if st.button("Select all", key="materials_remove_select_all", use_container_width=True):
-            st.session_state["materials_remove_pick"] = list(materials_df.index)
-    with col_rm_clear_all:
-        if st.button("Clear all", key="materials_remove_clear_all", use_container_width=True):
-            st.session_state["materials_remove_pick"] = []
-
-    to_remove = st.multiselect(
-        "Materials to remove",
-        options=list(materials_df.index),
-        format_func=_format_material_removal_choice,
-        key="materials_remove_pick",
+    st.caption("Check the row(s) you want to remove (click a column header to sort), then click Remove below.")
+    event = st.dataframe(
+        materials_df,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        column_config={
+            "Unit Cost (₱)": st.column_config.NumberColumn("Unit Cost (₱)", format="accounting"),
+            "Total Cost (₱)": st.column_config.NumberColumn("Total Cost (₱)", format="accounting"),
+        },
+        key="materials_remove_table",
     )
-    if to_remove and st.button(f"🗑️ Remove {len(to_remove)} item(s)", type="primary"):
-        st.session_state.materials_df = boq_data.recompute_material_totals(
-            st.session_state.materials_df.drop(index=to_remove)
-        )
-        st.session_state["_reset_materials_remove_pick"] = True
-        st.toast(f"Removed {len(to_remove)} item(s).", icon="🗑️")
-        st.rerun()
+    selected_positions = event.selection.rows
+    if selected_positions:
+        to_remove = materials_df.index[selected_positions]
+        if st.button(f"🗑️ Remove {len(to_remove)} item(s)", type="primary"):
+            st.session_state.materials_df = boq_data.recompute_material_totals(
+                st.session_state.materials_df.drop(index=to_remove)
+            )
+            st.toast(f"Removed {len(to_remove)} item(s).", icon="🗑️")
+            st.rerun()
 
 
 @st.dialog("🔎 Price check", width="large")
@@ -486,45 +473,33 @@ def _add_material_dialog() -> None:
             st.rerun()
 
 
-@st.dialog("🗑️ Remove catalog items", width="small")
+@st.dialog("🗑️ Remove catalog items", width="large")
 def _remove_catalog_dialog() -> None:
     catalog_df = catalog.sort_catalog_df(st.session_state.catalog_df)
     if catalog_df.empty:
         st.caption("No catalog items to remove.")
         return
 
-    def _format_catalog_removal_choice(idx: int) -> str:
-        row = catalog_df.loc[idx]
-        return f"[{row['Store Name']}] {row['Category']} — {row['Material']} · ₱{row['Unit Cost (₱)']:,.2f}"
-
-    # See the matching comment in _remove_materials_dialog: session_state[key]
-    # can't be reassigned after that widget has already been instantiated
-    # this run, so clearing the selection after a removal is deferred to a
-    # flag consumed here, before the multiselect below is created.
-    if st.session_state.pop("_reset_catalog_remove_pick", False):
-        st.session_state["catalog_remove_pick"] = []
-
-    col_rm_select_all, col_rm_clear_all = st.columns(2)
-    with col_rm_select_all:
-        if st.button("Select all", key="catalog_remove_select_all", use_container_width=True):
-            st.session_state["catalog_remove_pick"] = list(catalog_df.index)
-    with col_rm_clear_all:
-        if st.button("Clear all", key="catalog_remove_clear_all", use_container_width=True):
-            st.session_state["catalog_remove_pick"] = []
-
-    to_remove_catalog = st.multiselect(
-        "Catalog items to remove",
-        options=list(catalog_df.index),
-        format_func=_format_catalog_removal_choice,
-        key="catalog_remove_pick",
+    st.caption("Check the row(s) you want to remove (click a column header to sort), then click Remove below.")
+    event = st.dataframe(
+        catalog_df,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="multi-row",
+        column_config={
+            "Unit Cost (₱)": st.column_config.NumberColumn("Unit Cost (₱)", format="accounting"),
+        },
+        key="catalog_remove_table",
     )
-    if to_remove_catalog and st.button(f"🗑️ Remove {len(to_remove_catalog)} item(s)", type="primary"):
-        st.session_state.catalog_df = catalog.normalize_catalog_df(
-            st.session_state.catalog_df.drop(index=to_remove_catalog)
-        )
-        st.session_state["_reset_catalog_remove_pick"] = True
-        st.toast(f"Removed {len(to_remove_catalog)} item(s).", icon="🗑️")
-        st.rerun()
+    selected_positions = event.selection.rows
+    if selected_positions:
+        to_remove_catalog = catalog_df.index[selected_positions]
+        if st.button(f"🗑️ Remove {len(to_remove_catalog)} item(s)", type="primary"):
+            st.session_state.catalog_df = catalog.normalize_catalog_df(
+                st.session_state.catalog_df.drop(index=to_remove_catalog)
+            )
+            st.toast(f"Removed {len(to_remove_catalog)} item(s).", icon="🗑️")
+            st.rerun()
 
 
 @st.dialog("🏬 Manage stores", width="large")

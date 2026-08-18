@@ -137,37 +137,47 @@ row add/delete moved into dialogs (see "Layout" above):
   Catalog's "➕ Add material" dialog is the small Category/Material/Brand/
   Model/UoM/Store/Unit Cost form.
 - **Deleting**: both tables have a "🗑️ Remove" button opening a dialog with
-  a `st.multiselect` (Select all/Clear all + a "Remove N item(s)" button)
-  -- titled "🗑️ Remove materials" (BOQ) vs "🗑️ Remove catalog items"
-  (Catalog) specifically so the two are distinguishable when referenced
-  out of context (they used to share the identical label "🗑️ Remove
-  materials" as two separate page sections). The removal dialogs list
-  *every* row, not just whatever the main page's search box currently
-  filters to -- deliberately decoupled from that outer search state now
-  that they're dialogs, since `st.multiselect` already supports typing to
-  filter its own option list.
-  **First attempt at deleting was a transient in-grid checkbox column**
-  (check a row, "Apply changes" removes it) -- scrapped after real use
-  surfaced two problems: (1) no way to select/check multiple rows at once
-  or "select all", and (2) even if it had one, checking every box and
-  triggering a rerun would have applied the removal immediately, before
-  the user could review -- because the "apply this table's edits" logic
-  below the form already runs unconditionally on every rerun (not gated
-  behind "was submit actually clicked"), which is fine for the form's own
-  deferred-edit batching but doesn't compose safely with an external
-  "select all" action. The multiselect-based picker avoids this entirely:
-  it's a fully separate, explicit action button, not entangled with the
-  grid/form's state at all. One implementation pitfall hit along the way:
-  resetting the multiselect's selection after a removal via
-  `st.session_state[key] = []` **immediately** raises
+  a **read-only, checkbox-selectable `st.dataframe`** (`on_select="rerun",
+  selection_mode="multi-row"`, showing the full row -- every column, not
+  just a formatted label) and a "Remove N item(s)" button that appears
+  once anything's checked -- titled "🗑️ Remove materials" (BOQ) vs
+  "🗑️ Remove catalog items" (Catalog) specifically so the two are
+  distinguishable when referenced out of context (they used to share the
+  identical label "🗑️ Remove materials" as two separate page sections).
+  `st.dataframe`'s native selection UI includes its own header checkbox
+  ("select all" for free) and per-row checkboxes -- no custom Select
+  all/Clear all buttons needed. Selected rows come back as *positions*
+  (`event.selection.rows`, 0-based into the currently-displayed/sorted
+  DataFrame) which must be translated to real index labels via
+  `df.index[selected_positions]` before `.drop(index=...)` -- position and
+  label aren't the same thing once the table's been sorted (its index
+  keeps the original, pre-sort labels). The removal dialogs list *every*
+  row, not just whatever the main page's search box currently filters to
+  -- deliberately decoupled from that outer search state now that they're
+  dialogs (the dataframe's own column-header click-to-sort covers
+  "find the row I want" well enough on its own).
+  **Went through two earlier designs before this one, both replaced after
+  real use surfaced problems**: (1) a transient in-grid checkbox *column*
+  on the main editable table (check a row, "Apply changes" removes it) --
+  couldn't support "select all" safely, since the "apply this table's
+  edits" logic below the form runs unconditionally on every rerun (not
+  gated behind "was submit actually clicked"), so pre-checking every box
+  via an external button would have applied the removal immediately,
+  before the user could review. (2) `st.multiselect` + Select all/Clear
+  all buttons + a text-formatted label per row -- worked, but user
+  feedback called it "not user friendly" next to Other Expenses' native
+  per-row delete (which the Materials tables can't use directly, since
+  `num_rows="dynamic"` -- the mode that enables it -- disables column
+  sorting, and sorting was the more valuable of the two here). The
+  dataframe-selection approach above is the closest approximation to
+  Other Expenses' feel without giving up sorting: checkboxes directly on
+  visible rows, not a separate text-based picker. One pitfall hit with the
+  multiselect version, now moot but worth remembering for any future
+  `st.multiselect`-based picker: resetting its selection after an action
+  via `st.session_state[key] = []` **immediately** raises
   `StreamlitAPIException` if that widget already rendered earlier in the
-  same script run (which it has, since the "Remove" button sits below it)
-  -- a widget's `session_state[key]` can only be reassigned *before* that
-  widget is instantiated in a given run. Fixed by deferring the reset to a
-  plain flag, consumed (and only then applied to the widget's key) right
-  before the multiselect renders on the *next* run. This fix is unaffected
-  by later moving the whole thing into a dialog -- dialogs don't change
-  widget/session_state semantics at all.
+  same script run -- a widget's `session_state[key]` can only be
+  reassigned *before* that widget is instantiated in a given run.
 
 **Default sort order**: both tables load pre-sorted --
 `boq_data.sort_materials_df()` (Category, then Material, ascending) for
