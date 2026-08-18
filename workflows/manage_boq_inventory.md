@@ -47,6 +47,23 @@ text input's label-row height, so it drifted out of alignment. Collapsing
 the label removes the height mismatch at the source. Use this pattern for
 any future search-box-next-to-button row instead of a spacer.
 
+The Materials table (both tabs: BOQ Materials, Materials Catalog) is
+wrapped in `st.form(..., border=False)` with an "Apply changes" submit
+button, rather than a bare `st.data_editor`. Without the form, Streamlit
+reruns the *entire script* every time a cell edit is committed (tabbing or
+clicking to the next cell) -- filling in one new row across 5-6 columns
+meant up to 5-6 full-page reruns before the user finished, which reads as
+the page "refreshing" mid-entry. Inside a form, `st.data_editor`'s edits
+(including add/delete rows) are batched client-side and only reach Python
+when the submit button is clicked -- one rerun for an entire row (or
+batch of edits) instead of one per cell. The tradeoff, explicitly accepted
+for this app: things that depend on the edited data (Materials
+Total/Grand Total metrics, the price-check list, Total Cost recomputation)
+only update once "Apply changes" is clicked, not live as you type. The
+"➕ Add items from catalog" preview table and the Other Expenses table were
+deliberately left un-batched (out of scope when this was raised, and lower
+friction anyway -- typically only 1-2 cells being edited at a time).
+
 ## How to run
 ```
 cd "Solar System"

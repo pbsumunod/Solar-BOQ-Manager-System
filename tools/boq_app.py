@@ -372,24 +372,29 @@ with tab_boq:
             if search_query.strip():
                 filtered = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
                 st.caption(f"Showing {len(filtered)} of {len(materials_df)} items. Clear search to add or delete rows.")
-                edited = st.data_editor(
-                    filtered,
-                    num_rows="fixed",
-                    column_config=column_config,
-                    key="materials_editor_filtered",
-                )
+                with st.form("materials_form_filtered", border=False):
+                    edited = st.data_editor(
+                        filtered,
+                        num_rows="fixed",
+                        column_config=column_config,
+                        key="materials_editor_filtered",
+                    )
+                    st.form_submit_button("Apply changes", type="primary")
                 materials_df.loc[edited.index] = edited
                 materials_df = boq_data.recompute_material_totals(materials_df)
             else:
-                edited = st.data_editor(
-                    materials_df,
-                    num_rows="dynamic",
-                    column_config=column_config,
-                    key="materials_editor",
-                )
+                with st.form("materials_form", border=False):
+                    edited = st.data_editor(
+                        materials_df,
+                        num_rows="dynamic",
+                        column_config=column_config,
+                        key="materials_editor",
+                    )
+                    st.form_submit_button("Apply changes", type="primary")
                 materials_df = boq_data.recompute_material_totals(edited)
 
             st.session_state.materials_df = materials_df
+            st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" — totals and the price-check list below update after you apply.")
 
             with st.expander("🔎 Price-check links (Shopee / Lazada / Facebook Marketplace)"):
                 visible_materials = materials_df[_text_search_mask(materials_df, search_query, materials_search_cols)]
@@ -473,20 +478,25 @@ with tab_catalog:
     if catalog_search.strip():
         visible_catalog = catalog_df[_text_search_mask(catalog_df, catalog_search, catalog_search_cols)]
         st.caption(f"Showing {len(visible_catalog)} of {len(catalog_df)} items. Clear search to add or delete rows.")
-        edited_catalog = st.data_editor(
-            visible_catalog,
-            num_rows="fixed",
-            column_config=catalog_column_config,
-            key="catalog_editor_filtered",
-        )
+        with st.form("catalog_form_filtered", border=False):
+            edited_catalog = st.data_editor(
+                visible_catalog,
+                num_rows="fixed",
+                column_config=catalog_column_config,
+                key="catalog_editor_filtered",
+            )
+            st.form_submit_button("Apply changes", type="primary")
         catalog_df.loc[edited_catalog.index] = edited_catalog
     else:
-        catalog_df = st.data_editor(
-            catalog_df,
-            num_rows="dynamic",
-            column_config=catalog_column_config,
-            key="catalog_editor",
-        )
+        with st.form("catalog_form", border=False):
+            catalog_df = st.data_editor(
+                catalog_df,
+                num_rows="dynamic",
+                column_config=catalog_column_config,
+                key="catalog_editor",
+            )
+            st.form_submit_button("Apply changes", type="primary")
+    st.caption("Edit cells or add/remove rows above, then click \"Apply changes\" to save them into this session (still separate from \"💾 Save catalog\", which writes to storage).")
 
     # Normalize right after editing (same pattern as materials_df going
     # through recompute_material_totals after its own editor) so a
