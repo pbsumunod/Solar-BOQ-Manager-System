@@ -603,6 +603,7 @@ with tab_boq:
                     display_df,
                     num_rows="fixed",
                     column_config=column_config,
+                    hide_index=True,
                     key="materials_editor",
                 )
                 st.form_submit_button("Apply changes", type="primary")
@@ -851,6 +852,7 @@ with tab_catalog:
             display_catalog_df,
             num_rows="fixed",
             column_config=catalog_column_config,
+            hide_index=True,
             key="catalog_editor",
         )
         st.form_submit_button("Apply changes", type="primary")
