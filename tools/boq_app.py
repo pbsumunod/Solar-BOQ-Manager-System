@@ -99,7 +99,7 @@ def _project_dirty() -> bool:
 
 
 def _snapshot_catalog_bundle() -> None:
-    """The Materials Catalog tab now covers three pieces of session state
+    """The Materials Catalog view now covers three pieces of session state
     (the catalog itself, plus Stores/Categories master data) under one
     "Save catalog" button -- snapshot all three together so the dirty flag
     reflects any of them changing."""
@@ -244,7 +244,7 @@ def _add_materials_dialog() -> None:
     store_names = st.session_state.stores_df["Store Name"].tolist()
 
     if catalog_df.empty:
-        st.caption("Materials Catalog is empty — add default materials in the 🗂️ Materials Catalog tab.")
+        st.caption("Materials Catalog is empty — switch to the 🗂️ Catalog view (sidebar) to add default materials.")
         return
 
     def _catalog_rows_to_material_rows(picked_df: pd.DataFrame, quantities) -> pd.DataFrame:
@@ -636,91 +636,115 @@ project_store, catalog_store = _select_storage_backend()
 _init_state()
 
 # ---------------------------------------------------------------------------
-# Sidebar: project management, grouped by how often each action is used --
-# switching/saving the active project first, setup/reference actions last.
+# Sidebar: a "View" toggle up top (📋 Project vs 🗂️ Catalog -- the Catalog
+# isn't scoped to any project, so it's a peer of "which project", not a
+# peer of "which section of a project", the way a same-level tab implied).
+# Below that, only what's used constantly for the active view; occasional
+# actions (Rename, New project, template download) live in one "⋮ More"
+# popover instead of being permanently expanded on the page.
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("☀️ BOQ Manager")
 
-    projects = _cached_list_projects()
-    project_options = {p["slug"]: p["name"] for p in projects}
-
-    st.subheader("📁 Active project")
-    if project_options:
-        slugs = list(project_options.keys())
-        current = st.session_state.current_project_slug
-        index = slugs.index(current) if current in slugs else 0
-        selected_slug = st.selectbox(
-            "Project",
-            options=slugs,
-            format_func=lambda s: project_options[s],
-            index=index,
-            key="project_selector",
-            label_visibility="collapsed",
-        )
-        if selected_slug != st.session_state.current_project_slug:
-            _load_project(selected_slug)
-            st.rerun()
-
-        project_dirty = _project_dirty()
-        col_save, col_export = st.columns(2)
-        with col_save:
-            save_label = "🟠 Save*" if project_dirty else "✅ Save"
-            if st.button(
-                save_label,
-                type="primary" if project_dirty else "secondary",
-                use_container_width=True,
-                help="Unsaved changes in this session" if project_dirty else "Everything is saved",
-            ):
-                project_store.save_project(
-                    st.session_state.current_project_slug,
-                    st.session_state.materials_df,
-                    st.session_state.expenses_df,
-                    st.session_state.project_meta,
-                )
-                _snapshot_project()
-                st.toast("Project saved.", icon="💾")
-                st.rerun()
-        with col_export:
-            st.download_button(
-                "⬇️ Export",
-                data=boq_data.export_bytes(
-                    st.session_state.materials_df,
-                    st.session_state.expenses_df,
-                    st.session_state.project_meta,
-                ),
-                file_name=f"{st.session_state.current_project_slug}.xlsx",
-                mime=EXCEL_MIME,
-                use_container_width=True,
-            )
-
-        if st.button("✏️ Rename", use_container_width=True):
-            _rename_project_dialog()
-    else:
-        st.caption("No projects yet — create one below.")
-
-    st.divider()
-    if st.button("➕ New project", type="primary", use_container_width=True):
-        _create_project_dialog()
-
-    st.divider()
-    st.download_button(
-        "⬇️ Download blank BOQ template",
-        data=boq_data.generate_template_workbook(
-            st.session_state.category_list_df, st.session_state.catalog_df
-        ),
-        file_name="boq_template.xlsx",
-        mime=EXCEL_MIME,
-        use_container_width=True,
-        help="Category and Material columns include dropdown suggestions from the Materials Catalog.",
+    # st.segmented_control would look nicer here, but this Streamlit
+    # install's AppTest support for it is broken across reruns once a
+    # non-default option is selected (confirmed with a minimal repro, even
+    # using plain non-emoji option text) -- st.radio is functionally
+    # equivalent as a toggle and, unlike segmented_control, has been
+    # reliably testable throughout this project.
+    view = st.radio(
+        "View",
+        ["📋 Project", "🗂️ Catalog"],
+        horizontal=True,
+        key="app_view",
+        label_visibility="collapsed",
     )
 
-# ---------------------------------------------------------------------------
-# Main area
-# ---------------------------------------------------------------------------
-tab_boq, tab_catalog = st.tabs(["📋 BOQ", "🗂️ Materials Catalog"])
+    st.divider()
 
-with tab_boq:
+    if view == "🗂️ Catalog":
+        st.caption(
+            "The Materials Catalog is shared across every project -- it isn't "
+            "tied to whichever project is active."
+        )
+    else:
+        projects = _cached_list_projects()
+        project_options = {p["slug"]: p["name"] for p in projects}
+
+        st.subheader("📁 Active project")
+        if project_options:
+            slugs = list(project_options.keys())
+            current = st.session_state.current_project_slug
+            index = slugs.index(current) if current in slugs else 0
+            selected_slug = st.selectbox(
+                "Project",
+                options=slugs,
+                format_func=lambda s: project_options[s],
+                index=index,
+                key="project_selector",
+                label_visibility="collapsed",
+            )
+            if selected_slug != st.session_state.current_project_slug:
+                _load_project(selected_slug)
+                st.rerun()
+
+            project_dirty = _project_dirty()
+            col_save, col_export = st.columns(2)
+            with col_save:
+                save_label = "🟠 Save*" if project_dirty else "✅ Save"
+                if st.button(
+                    save_label,
+                    type="primary" if project_dirty else "secondary",
+                    use_container_width=True,
+                    help="Unsaved changes in this session" if project_dirty else "Everything is saved",
+                ):
+                    project_store.save_project(
+                        st.session_state.current_project_slug,
+                        st.session_state.materials_df,
+                        st.session_state.expenses_df,
+                        st.session_state.project_meta,
+                    )
+                    _snapshot_project()
+                    st.toast("Project saved.", icon="💾")
+                    st.rerun()
+            with col_export:
+                st.download_button(
+                    "⬇️ Export",
+                    data=boq_data.export_bytes(
+                        st.session_state.materials_df,
+                        st.session_state.expenses_df,
+                        st.session_state.project_meta,
+                    ),
+                    file_name=f"{st.session_state.current_project_slug}.xlsx",
+                    mime=EXCEL_MIME,
+                    use_container_width=True,
+                )
+        else:
+            st.caption("No projects yet — use the menu below to create one.")
+
+        st.divider()
+        with st.popover("⋮ More", use_container_width=True):
+            if project_options and st.button("✏️ Rename project", key="open_rename_from_more", use_container_width=True):
+                _rename_project_dialog()
+            if st.button("➕ New project", key="open_create_from_more", type="primary", use_container_width=True):
+                _create_project_dialog()
+            st.download_button(
+                "⬇️ Download blank BOQ template",
+                data=boq_data.generate_template_workbook(
+                    st.session_state.category_list_df, st.session_state.catalog_df
+                ),
+                file_name="boq_template.xlsx",
+                mime=EXCEL_MIME,
+                use_container_width=True,
+                help="Category and Material columns include dropdown suggestions from the Materials Catalog.",
+            )
+
+# ---------------------------------------------------------------------------
+# Main area -- driven by the sidebar's "View" toggle rather than st.tabs(),
+# since the Catalog isn't project-scoped and having it as a same-level tab
+# next to the project view implied it was.
+# ---------------------------------------------------------------------------
+if view == "📋 Project":
     if not st.session_state.current_project_slug:
         st.title("☀️ BOQ Manager")
         st.info("👈 Create or select a project from the sidebar to get started.")
@@ -778,7 +802,7 @@ with tab_boq:
                         st.caption("No custom columns yet.")
 
             if catalog_df.empty:
-                st.caption("Materials Catalog is empty — add default materials in the 🗂️ Materials Catalog tab.")
+                st.caption("Materials Catalog is empty — switch to the 🗂️ Catalog view (sidebar) to add default materials.")
 
             search_query = st.text_input(
                 "Search materials",
@@ -874,7 +898,7 @@ with tab_boq:
             c2.metric("Other Expenses Total", f"₱{expenses_total:,.2f}")
             c3.metric("Grand Total", f"₱{grand_total:,.2f}")
 
-with tab_catalog:
+else:
     st.title("🗂️ Materials Catalog")
     st.caption(
         "Multi-store default materials and prices you can pull into any BOQ. Edits here update the "

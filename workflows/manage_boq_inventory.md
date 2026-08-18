@@ -60,9 +60,34 @@ section was folded into the new "🔎 Price check" dialog (which now also
 holds the per-material link list) rather than sitting on the main page as
 a separate section.
 
-The sidebar keeps the active project selector plus Save/Export inline
-(used constantly); "✏️ Rename" and "➕ New project" are buttons that open
-dialogs instead of expanders.
+The sidebar opens with a "📋 Project" / "🗂️ Catalog" `st.radio(horizontal=
+True)` toggle -- **this is what selects the main area's content now,
+replacing the earlier `st.tabs(["📋 BOQ", "🗂️ Materials Catalog"])`**. The
+Catalog isn't scoped to any project (same data regardless of which
+project is active), so having it as a `st.tabs()` peer of the BOQ view
+implied a "section of a project" relationship that wasn't real -- per
+user feedback ("should Material Catalog be in higher menu and not in
+project level?"). The toggle is a peer of "which project", not a peer of
+"which section of a project". Below the toggle: "📁 Active project" (the
+selector, Save, Export) only renders in Project view -- Catalog view shows
+a one-line caption instead, since Save/Export apply to the project, not
+the catalog (the catalog has its own "Save catalog" button in the main
+area). "✏️ Rename project", "➕ New project", and the template download
+are further condensed into one "⋮ More" `st.popover` (used constantly ->
+inline; occasional -> one small menu instead of stacked buttons/dividers).
+`st.radio`, not `st.segmented_control`, despite the latter looking nicer
+for a toggle like this -- see "Things learned" below.
+
+A structural side effect worth knowing: with `st.tabs()`, **both** tabs'
+bodies executed on every rerun (Streamlit always runs every tab's code
+regardless of which is visually active -- this is *why* the duplicate
+button ID bug happened, see "Things learned"). With the radio-driven
+`if view == "📋 Project": ... else: ...` structure, only the active
+branch's code runs each rerun -- a plain `if/else` short-circuits, a
+`with tab: ...` context manager doesn't. One less thing to worry about
+colliding across the two views now, though every button still keeps its
+explicit `key` regardless, since it costs nothing and this project has
+already been burned by relying on "the label looks unique" once.
 
 Success confirmations that are immediately followed by `st.rerun()` (e.g.
 "Created project", "Renamed") use `st.toast()`, not `st.success()` --
@@ -709,3 +734,22 @@ automatically based on whether Google credentials are configured, via
   verified working as plain page content (pre-dialog) or as standalone
   Python functions, which is the basis for confidence here despite the
   gap in this specific harness's coverage.
+- **`AppTest` cannot drive `st.segmented_control` across more than one
+  rerun in this Streamlit version (1.50.0)**, discovered while building
+  the sidebar's Project/Catalog view toggle. First rerun after construction
+  works fine either way (driven via `.set_value(...)` or via pre-seeding
+  `st.session_state` directly); any *second* rerun of the same `AppTest`
+  instance -- regardless of how the value got there -- raises inside
+  `AppTest`'s own internal widget-state serialization (`ValueError:
+  content_icon: "🗂" is not in list`, or `TypeError: 'Option' object is not
+  iterable`, depending on exactly how it's driven). Confirmed this is a
+  harness bug, not a usage mistake or something specific to this app's
+  emoji-prefixed option labels: a minimal two-line repro with plain
+  "Project"/"Catalog" text (no emoji at all) reproduces it identically.
+  Swapped to `st.radio(horizontal=True)` instead -- functionally
+  equivalent as a toggle, and (unlike `segmented_control`) has been
+  reliably drivable via `AppTest` throughout this whole project. Lesson:
+  when a newer/fancier widget breaks in the test harness for reasons that
+  don't trace back to anything in this app's own code, don't burn time
+  debugging the app side -- swap to the older, already-proven-reliable
+  widget and move on, especially when the visual difference is minor.
